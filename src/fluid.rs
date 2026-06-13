@@ -39,8 +39,10 @@ pub struct FluidSettings {
 impl Default for FluidSettings {
     fn default() -> Self {
         Self {
-            vorticity: 18.0,
-            dye_keep: 0.994,
+            // Moderate vorticity — high values feed back with the audio
+            // injection and (even with the velocity clamp) look chaotic.
+            vorticity: 9.0,
+            dye_keep: 0.992,
             plume: 1.0,
         }
     }
@@ -271,8 +273,13 @@ impl Fluid {
         } else {
             1.0
         };
-        let plume_power =
-            (0.25 * sub + 1.2 * d.onset_sub + 0.5 * d.onset_bass) * s.plume * beat_kick * beat_pump;
+        // Capped so a stacked kick (onset + beat kick + beat pump all peaking
+        // together) can't dump a huge impulse into the field in one step.
+        let plume_power = ((0.25 * sub + 1.2 * d.onset_sub + 0.5 * d.onset_bass)
+            * s.plume
+            * beat_kick
+            * beat_pump)
+            .min(2.5);
         if plume_power > 0.01 {
             let x = 0.5 + 0.30 * (time_s * 0.11).sin();
             splats[0] = [x, 0.96, 0.10, 0.0];
@@ -303,7 +310,7 @@ impl Fluid {
         let p = FluidParams {
             dt,
             vorticity: s.vorticity,
-            vel_dissipation: 0.985,
+            vel_dissipation: 0.97, // stronger drag so velocity settles instead of accumulating
             dye_dissipation: s.dye_keep,
             wind: [0.015 * d.bg_bands[2], 0.0], // mid → lateral drift
             texel: [1.0 / FLUID_W as f32, 1.0 / FLUID_H as f32],
@@ -368,13 +375,18 @@ impl Fluid {
         runs.push((&self.pipelines.advect_dye, self.bind(device, &self.vel[v], &self.dye[dy], &self.dye[dy ^ 1])));
         let dy = dy ^ 1;
 
-        {
+        // CRITICAL: one compute pass PER dispatch. Every fluid stage reads the
+        // previous stage's output texture, but wgpu only inserts storage-texture
+        // memory barriers at pass boundaries — NOT between dispatches inside a
+        // single pass. Batching them all in one pass let the dependent dispatches
+        // race on NVIDIA: the field rendered once on the clean zero-textures at
+        // launch, then corrupted and froze. A pass per dispatch forces the
+        // barriers. ~30 tiny passes at 60Hz is negligible.
+        for (pipeline, bg) in &runs {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            for (pipeline, bg) in &runs {
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(wg.0, wg.1, 1);
-            }
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(wg.0, wg.1, 1);
         }
 
         encoder.copy_texture_to_texture(

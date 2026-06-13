@@ -157,12 +157,16 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
         col = mix(col, vec3<f32>(0.01569, 0.03529, 0.07059), clamp(-dir.y * 6.0, 0.0, 1.0));
     }
 
-    // Sub-LSB dither: the sky is slow, dark gradients on an 8-bit surface —
-    // banding is guaranteed without this. ±0.5/255 hash noise is invisible
-    // as noise but completely breaks the bands. Time-varying so the noise
-    // never reads as a static texture.
-    let dither = (hash21(in.ndc * vec2<f32>(1741.3, 921.7) + fract(u.beat.w) * 13.7) - 0.5) * (1.6 / 255.0);
-    col += vec3<f32>(dither);
+    // TPDF dither: the sky is slow, dark gradients on an 8-bit surface, so
+    // banding is guaranteed without this — most visible where the beat-breathing
+    // horizon glow brightens a near-black ramp. Triangular-PDF (two independent
+    // hashes summed) at ±1 LSB makes the quantization error white and
+    // signal-independent, which uniform-PDF dither doesn't — it's what fully
+    // kills the bands. Animated per-frame so the eye time-averages it to clean.
+    let seed = in.ndc + fract(u.beat.w) * vec2<f32>(13.7, 7.1);
+    let r1 = hash21(seed * vec2<f32>(1741.3, 921.7));
+    let r2 = hash21(seed * vec2<f32>(913.7, 1733.1) + 19.19);
+    col += vec3<f32>((r1 + r2 - 1.0) * (1.0 / 255.0));
 
     return vec4<f32>(col, 1.0);
 }

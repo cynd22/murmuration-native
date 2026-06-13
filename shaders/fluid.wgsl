@@ -160,7 +160,19 @@ fn advect_vel(@builtin(global_invocation_id) gid: vec3<u32>) {
     let v = textureSampleLevel(tex_a, samp, uv, 0.0).xy;
     let prev = uv - v * fp.dt;
     let sampled = textureSampleLevel(tex_a, samp, prev, 0.0);
-    textureStore(out_tex, vec2<i32>(gid.xy), vec4<f32>(sampled.xy * fp.vel_dissipation, sampled.zw));
+    var nv = sampled.xy * fp.vel_dissipation;
+    // STABILITY BACKSTOP. Vorticity confinement + audio injection can feed back
+    // and blow the velocity field up to Inf/NaN within ~0.5s, and NaN is sticky
+    // (NaN * anything = NaN) so the whole sim freezes. Guard order matters:
+    //   1. NaN -> 0   (NaN != NaN is true)
+    //   2. clamp components to finite (turns Inf into a real number)
+    //   3. clamp magnitude (now safe — no Inf*0 = NaN)
+    // This also self-heals an already-corrupted field on hot-reload.
+    nv = select(nv, vec2<f32>(0.0), nv != nv);
+    nv = clamp(nv, vec2<f32>(-1.0e4), vec2<f32>(1.0e4));
+    let m = length(nv);
+    if (m > 4.0) { nv = nv * (4.0 / m); }
+    textureStore(out_tex, vec2<i32>(gid.xy), vec4<f32>(nv, sampled.zw));
 }
 
 @compute @workgroup_size(8, 8)
@@ -171,13 +183,13 @@ fn advect_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let prev = uv - v * fp.dt;
     let dye = textureSampleLevel(tex_b, samp, prev, 0.0);
     // Heat (y) cools ~3x faster than density so fresh plumes read brighter.
-    textureStore(
-        out_tex,
-        vec2<i32>(gid.xy),
-        vec4<f32>(
-            dye.x * fp.dye_dissipation,
-            dye.y * (fp.dye_dissipation * fp.dye_dissipation * fp.dye_dissipation),
-            dye.zw,
-        ),
+    var nd = vec2<f32>(
+        dye.x * fp.dye_dissipation,
+        dye.y * (fp.dye_dissipation * fp.dye_dissipation * fp.dye_dissipation),
     );
+    // Same NaN/Inf/range guard as velocity (a blown-up velocity field can
+    // advect garbage into the dye). Density/heat saturate visually by ~2 anyway.
+    nd = select(nd, vec2<f32>(0.0), nd != nd);
+    nd = clamp(nd, vec2<f32>(0.0), vec2<f32>(8.0));
+    textureStore(out_tex, vec2<i32>(gid.xy), vec4<f32>(nd, 0.0, 0.0));
 }
