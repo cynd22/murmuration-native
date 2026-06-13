@@ -1,0 +1,25 @@
+[package]
+name = "murmuration"
+version = "0.1.0"
+edition = "2024"
+
+# Fast iteration: our own code builds at opt 1 (quick), dependencies at opt 3
+# (wgpu/winit only rebuild when versions change, so their compile cost is paid once).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dependencies]
+bytemuck = { version = "1.25.0", features = ["derive"] }
+env_logger = "0.11.10"
+glam = "0.33.1"
+log = "0.4.32"
+notify = "8.2.0"
+pollster = "0.4.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tungstenite = "0.29.0"
+wgpu = "29.0.3"
+winit = "0.30.13"
