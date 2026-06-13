@@ -122,6 +122,15 @@ pub struct Renderer {
     bird_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
+    // Half-res sky: the fullscreen sky pass renders here, then a cheap blit
+    // upscales it before ground+birds (full res). ~4x cheaper sky at 4K.
+    #[allow(dead_code)] // held only to keep the texture alive behind sky_view
+    sky_tex: wgpu::Texture,
+    sky_view: wgpu::TextureView,
+    sky_sampler: wgpu::Sampler,
+    blit_bgl: wgpu::BindGroupLayout,
+    blit_bg: wgpu::BindGroup,
+    blit_pipeline: wgpu::RenderPipeline,
     depth: wgpu::TextureView,
     format: wgpu::TextureFormat,
     n: u32,
@@ -235,6 +244,39 @@ impl Renderer {
         let (bird_pipeline, ground_pipeline, background_pipeline) =
             build_pipelines(device, &layout, format, sources)?;
 
+        let (sky_tex, sky_view) = create_sky_target(device, format, width, height);
+        let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sky upscale sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky blit bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_bg = make_blit_bg(device, &blit_bgl, &sky_view, &sky_sampler);
+        let blit_pipeline = build_blit_pipeline(device, &blit_bgl, format)?;
+
         Ok(Self {
             uniforms_buf,
             bind_groups,
@@ -242,6 +284,12 @@ impl Renderer {
             bird_pipeline,
             ground_pipeline,
             background_pipeline,
+            sky_tex,
+            sky_view,
+            sky_sampler,
+            blit_bgl,
+            blit_bg,
+            blit_pipeline,
             depth: create_depth(device, width, height),
             format,
             n: sim.n,
@@ -259,6 +307,10 @@ impl Renderer {
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = create_depth(device, width, height);
+        let (sky_tex, sky_view) = create_sky_target(device, self.format, width, height);
+        self.sky_tex = sky_tex;
+        self.sky_view = sky_view;
+        self.blit_bg = make_blit_bg(device, &self.blit_bgl, &self.sky_view, &self.sky_sampler);
     }
 
     pub fn update_uniforms(&self, queue: &wgpu::Queue, aspect: f32, style: &FrameStyle) {
@@ -290,35 +342,62 @@ impl Renderer {
     }
 
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, flip: usize) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("scene"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(SKY),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
+        // Pass A: render the (expensive, low-frequency) sky into the half-res
+        // offscreen target. No depth needed — the fullscreen triangle covers it.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sky (half-res)"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.sky_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(SKY),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.bind_groups[flip], &[]);
+            pass.set_pipeline(&self.background_pipeline);
+            pass.draw(0..3, 0..1);
+        }
 
-        pass.set_bind_group(0, &self.bind_groups[flip], &[]);
-        pass.set_pipeline(&self.background_pipeline);
-        pass.draw(0..3, 0..1);
-        pass.set_pipeline(&self.ground_pipeline);
-        pass.draw(0..6, 0..1);
-        pass.set_pipeline(&self.bird_pipeline);
-        pass.draw(0..self.n * 9, 0..1);
+        // Pass B: full-res scene — upscale the sky, then ground + birds on top.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(SKY),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_bind_group(0, &self.blit_bg, &[]);
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.draw(0..3, 0..1);
+
+            pass.set_bind_group(0, &self.bind_groups[flip], &[]);
+            pass.set_pipeline(&self.ground_pipeline);
+            pass.draw(0..6, 0..1);
+            pass.set_pipeline(&self.bird_pipeline);
+            pass.draw(0..self.n * 9, 0..1);
+        }
     }
 }
 
@@ -374,7 +453,7 @@ fn build_pipelines(
         bias: Default::default(),
     };
 
-    let mk = |label: &str, vs: &str, fs: &str, depth: &wgpu::DepthStencilState| {
+    let mk = |label: &str, vs: &str, fs: &str, depth: Option<&wgpu::DepthStencilState>| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -389,7 +468,7 @@ fn build_pipelines(
                 cull_mode: None, // birds are double-sided triangles
                 ..Default::default()
             },
-            depth_stencil: Some(depth.clone()),
+            depth_stencil: depth.cloned(),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -406,12 +485,141 @@ fn build_pipelines(
         })
     };
 
-    let bird = mk("birds", "vs_bird", "fs_bird", &depth_state);
-    let ground = mk("ground", "vs_ground", "fs_ground", &depth_state);
-    let background = mk("background", "vs_bg", "fs_bg", &bg_depth_state);
+    let _ = &bg_depth_state; // (the sky now renders depthless into the offscreen target)
+    let bird = mk("birds", "vs_bird", "fs_bird", Some(&depth_state));
+    let ground = mk("ground", "vs_ground", "fs_ground", Some(&depth_state));
+    // Background renders into the half-res offscreen sky target (no depth there).
+    let background = mk("background", "vs_bg", "fs_bg", None);
 
     match pollster::block_on(scope.pop()) {
         Some(err) => Err(err),
         None => Ok((bird, ground, background)),
+    }
+}
+
+const SKY_DIV: u32 = 2; // sky rendered at 1/SKY_DIV resolution, then upscaled
+
+// Standalone upscale-blit shader (separate module so its group-0 texture/sampler
+// don't collide with the RenderUniforms binding in the bird+background module).
+const BLIT_WGSL: &str = r#"
+@group(0) @binding(0) var sky_tex: texture_2d<f32>;
+@group(0) @binding(1) var sky_samp: sampler;
+struct VO { @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VO {
+    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    let c = p[vi];
+    var o: VO;
+    o.clip = vec4<f32>(c, 0.99999, 1.0);
+    // Framebuffer is top-left origin; flip y so the upscaled sky matches.
+    o.uv = vec2<f32>(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);
+    return o;
+}
+@fragment
+fn fs_main(in: VO) -> @location(0) vec4<f32> {
+    return textureSampleLevel(sky_tex, sky_samp, in.uv, 0.0);
+}
+"#;
+
+fn create_sky_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sky half-res target"),
+        size: wgpu::Extent3d {
+            width: (width / SKY_DIV).max(1),
+            height: (height / SKY_DIV).max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    (tex, view)
+}
+
+fn make_blit_bg(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    sky_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sky blit bg"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(sky_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+fn build_blit_pipeline(
+    device: &wgpu::Device,
+    blit_bgl: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> Result<wgpu::RenderPipeline, wgpu::Error> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("sky blit"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blit layout"),
+        bind_group_layouts: &[Some(blit_bgl)],
+        ..Default::default()
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky blit pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        // In the scene pass (which has depth): fill the background, no depth test/write.
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    match pollster::block_on(scope.pop()) {
+        Some(err) => Err(err),
+        None => Ok(pipeline),
     }
 }
