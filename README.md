@@ -60,11 +60,27 @@ fragment-shader version had every cell scan every bird (O(cells × birds),
   `src/params.rs` or dense regions lose local cohesion (same safety-valve
   semantics as the HTML build).
 
+## Audio
+
+Run `feeder_onsets.py` (same one the HTML uses); the app connects to
+`ws://localhost:8766` automatically, reconnects every second if the feeder
+isn't up, and shows `audio ✓/✗` in the title bar. Override with `--ws <url>`.
+
+The full mapping layer is ported (`src/audio.rs`): subBass→attract/separation/
+freedom(inverse)/verticality, treble+upperMid→maxSpeed, upperMid→turn-rate+shear,
+mid→alignment, lowMid→cohesion, bass→paletteT (dark-trough swell + softened
+kick punctuation), air→twinkle (off by default), bass-onset→shockwave (off by
+default). All floors/ceilings/alphas are the HTML build's Kiseia-tuned values.
+Smoothing alphas are converted per tick (`1-(1-α)^(60·dt)`) so envelope time
+constants are identical at any sim rate.
+
 ## Status / roadmap
 
 - [x] Stage 0–1: scaffold, GPU sim, bird+ground rendering, hot reload, fixed timestep
-- [ ] Stage 2: websocket client for `feeder_onsets.py` (43 msg/s — interpolate
-      between messages), audio smoothing layer, band→uniform mappings
-- [ ] Stage 3: egui control panel (`H` to hide) + TOML presets
-- [ ] BPM/beat phase: add to the *feeder* (aubio via Arch's `python-aubio`),
-      so HTML and Rust clients both get it through the same socket
+- [x] Stage 2: feeder websocket client + smoothing layer + full band→uniform mappings
+- [ ] Stage 3: egui control panel (`H` to hide) + TOML presets (mapping
+      tunables currently live in `src/audio.rs` `Mapping::default()`)
+- [ ] BPM/beat phase: add to the *feeder* (aubio via Arch's `python-aubio` —
+      PyPI aubio is dead on Python 3.14; recreate the feeder venv with
+      `--system-site-packages`), so HTML and Rust clients both get it through
+      the same socket. Carry bpm / phase / nextBeatIn / confidence.
