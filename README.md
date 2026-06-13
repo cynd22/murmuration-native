@@ -3,7 +3,8 @@
 An audio-reactive 3D starling murmuration, in native Rust + WebGPU. Tens of
 thousands of GPU boids flock in real time and the music *shapes* how they move —
 the flock tightens on kicks, carves on guitar solos, disperses when things go
-quiet — over an audio-reactive fluid sky that billows in time with the beat.
+quiet, and banks through its turns so dark "agitation bands" ripple across the
+mass — all over an audio-reactive fluid sky that billows in time with the beat.
 
 It's the native port of a single-file WebGL visualiser, rebuilt on compute
 shaders: ~50,000 birds at well over 1000 fps on a mid-range GPU, where the
@@ -13,7 +14,33 @@ browser version capped out around 60.
 
 ---
 
-## Quick start (new to Linux? start here)
+## Download (no build needed)
+
+Grab the latest **`murmuration-linux-x86_64.tar.gz`** from the
+[Releases page](https://github.com/cynd22/murmuration-native/releases), then:
+
+```sh
+tar xzf murmuration-linux-x86_64.tar.gz
+cd murmuration
+./murmuration
+```
+
+Keep the `shaders/` folder next to the `murmuration` binary — the tarball already
+has them together. To *run* (not build) you only need your GPU's **Vulkan driver**;
+the other libraries it uses (libxkbcommon, ALSA, D-Bus) ship with almost every
+desktop already:
+
+- **Arch:** `sudo pacman -S --needed vulkan-icd-loader vulkan-intel` *(Intel)* — or `vulkan-radeon` *(AMD)* / `nvidia-utils` *(NVIDIA)*
+- **Debian / Ubuntu / Mint:** `sudo apt install libvulkan1 mesa-vulkan-drivers`
+- **Fedora:** `sudo dnf install vulkan-loader mesa-vulkan-drivers`
+
+If it won't launch, run it **from a terminal** so you can read the error (and on a
+weak/integrated GPU, start it with `./murmuration --sky-div 4` or `--no-sky` — see
+[Controls](#controls)). Full library list is in [BUILDING.md](BUILDING.md).
+
+---
+
+## Build from source (also quick)
 
 You need three things: the Rust toolchain, a few system libraries, and (optionally)
 the audio feeder. Copy-paste the block for your distro.
@@ -114,12 +141,15 @@ The panel has live sliders for:
 - **sky** — procedural clouds, stars, beat pulse, and the **fluid sky** (amount,
   heat glow, injection strength, swirl, cloud lifetime)
 - **camera** — height, distance, FOV
+- **realism** — bird **banking** (roll into turns) and dark **agitation bands** that sweep the flock through hard turns
 
 Command-line flags:
 
 ```sh
-cargo run --release -- --birds 50000     # start with a bigger flock
+cargo run --release -- --birds 100000    # bigger flock (default is 50,000)
 cargo run --release -- --uncapped        # disable vsync (benchmark / >60Hz displays)
+cargo run --release -- --sky-div 4       # cheap quarter-res sky (weak / integrated GPUs)
+cargo run --release -- --no-sky          # start with the sky off entirely
 cargo run --release -- --sim-hz 120      # change the fixed simulation tick rate
 cargo run --release -- --list-devices    # list audio inputs and exit
 cargo run --release -- --device "monitor"  # force a capture device by name
@@ -218,6 +248,7 @@ rarely need to touch. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Realtime autocorrelation beat tracking (tempo / phase / confidence)
 - [x] Audio-reactive sky: procedural clouds, stars, fluid plumes, aurora borealis
 - [x] MPRIS now-playing card with transport + seek (`P` toggles)
+- [x] Flight realism: bird banking + dark agitation bands
 - [ ] Save/load presets (TOML)
 
 ---
