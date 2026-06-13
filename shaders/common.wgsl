@@ -42,7 +42,7 @@ struct Params {
     // row 13
     camera_repel_strength: f32,
     tex_width: f32,           // ceil(sqrt(num_birds)) — preserves the GLSL rand() uv character
-    _pad0: f32,
+    bank_amount: f32,         // banking roll gain (cosmetic; stored bank → vel.w)
     _pad1: f32,
 }
 

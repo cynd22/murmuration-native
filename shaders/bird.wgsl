@@ -55,6 +55,7 @@ struct BirdOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) world_z: f32,
+    @location(2) bank: f32, // banking roll angle — drives the dark agitation bands
 }
 
 @vertex
@@ -65,6 +66,7 @@ fn vs_bird(@builtin(vertex_index) vi: u32) -> BirdOut {
     let pos_phase = positions[bird];
     let bird_pos = pos_phase.xyz;
     let phase = pos_phase.w;
+    let bank = velocities[bird].w; // banking roll angle (radians), set by the sim
 
     var v = BIRD_VERTS[vert];
 
@@ -104,7 +106,16 @@ fn vs_bird(@builtin(vertex_index) vi: u32) -> BirdOut {
         vec3<f32>(0.0, 0.0, 1.0),
     );
 
-    let world = maty * matz * v + bird_pos;
+    // Bank/roll around the bird's forward axis (local +x). Applied innermost so
+    // maty*matz then carries the roll onto the velocity-aligned heading.
+    let cb = cos(bank);
+    let sb = sin(bank);
+    let matx = mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, cb, sb),
+        vec3<f32>(0.0, -sb, cb),
+    );
+    let world = maty * matz * matx * v + bird_pos;
 
     // Per-bird plumage colour — dark blue-grey gradient across the flock with
     // deterministic per-bird jitter (same constants as BirdGeometry).
@@ -121,6 +132,7 @@ fn vs_bird(@builtin(vertex_index) vi: u32) -> BirdOut {
     out.clip = u.view_proj * vec4<f32>(world, 1.0);
     out.color = color;
     out.world_z = world.z;
+    out.bank = bank;
     return out;
 }
 
@@ -137,6 +149,13 @@ fn fs_bird(in: BirdOut) -> @location(0) vec4<f32> {
     let pal = palette(u.palette_t, u.palette_a.xyz, u.palette_b.xyz, u.palette_c.xyz, u.palette_d.xyz);
     let colored = base * pal * u.palette_intensity;
     var final_color = mix(base, colored, u.palette_enabled);
+
+    // Dark agitation bands: birds dim in proportion to how hard they're banking,
+    // so waves of banking (turns propagating through the flock) read as dark
+    // sweeps while level/cruising birds keep full brightness. Multiplicative →
+    // the dark trough is preserved. bg2.w is band strength (0 = off).
+    let band = mix(1.0, 1.0 - clamp(abs(in.bank) * 0.95, 0.0, 0.85), u.bg2.w);
+    final_color *= band;
 
     // Air-band shimmer — additive, zero when no air content, so it never
     // disturbs the dark trough.

@@ -51,7 +51,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut args = Args {
-        birds: 10_000,
+        birds: 50_000,
         uncapped: false,
         sim_hz: 240.0,
         ws_url: None,
@@ -464,7 +464,7 @@ impl State {
                 self.ui_state.fluid_mix,
                 self.ui_state.fluid_heat,
                 self.ui_state.aurora,
-                0.0,
+                self.ui_state.band_strength, // bird dark-agitation-bands (bg2.w)
             ],
         };
         self.renderer.update_uniforms(&self.queue, aspect, &style);

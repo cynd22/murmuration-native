@@ -22,6 +22,7 @@ pub struct UiState {
     pub fluid_mix: f32,  // how strongly the fluid dye shows in the sky
     pub fluid_heat: f32, // extra additive glow on fresh (hot) plumes
     pub aurora: f32,     // aurora-borealis curtain layer (independent of fluid_mix)
+    pub band_strength: f32, // dark agitation bands (banking dims edge-on wings)
     pub pending_birds: u32,
     pub apply_birds: bool,
     pub um_baseline_secs: f32, // UI-friendly form of Mapping::um_baseline_alpha
@@ -42,6 +43,7 @@ impl UiState {
             fluid_mix: 0.85,
             fluid_heat: 1.0,
             aurora: 0.7,
+            band_strength: 0.6,
             pending_birds: birds,
             apply_birds: false,
             um_baseline_secs: 6.0,
@@ -343,6 +345,14 @@ fn panel(
                 slider(ui, &mut state.cam.distance, 1200.0..=5000.0, "distance");
                 slider(ui, &mut state.cam.fov_deg, 10.0..=60.0, "fov");
             });
+
+            // === Realism — banking (birds roll into turns → dark agitation bands).
+            egui::CollapsingHeader::new("realism")
+                .default_open(true)
+                .show(ui, |ui| {
+                    slider(ui, &mut s.bank_amount, 0.0..=3.0, "banking (roll into turns)");
+                    slider(ui, &mut state.band_strength, 0.0..=1.0, "dark bands (banking dims wings)");
+                });
 
             // === Static fallbacks (only matter with audio mappings off).
             egui::CollapsingHeader::new("static flock (no-audio fallbacks)").show(ui, |ui| {

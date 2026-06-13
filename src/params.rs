@@ -46,6 +46,9 @@ pub struct Settings {
     pub box_strength: f32,
     pub camera_repel_radius: f32,
     pub camera_repel_strength: f32,
+    /// Banking: how hard birds roll into turns. Cosmetic (drives the dark
+    /// agitation bands); 0 = no roll.
+    pub bank_amount: f32,
 }
 
 impl Default for Settings {
@@ -75,6 +78,7 @@ impl Default for Settings {
             box_strength: 9.0,
             camera_repel_radius: 700.0,
             camera_repel_strength: 60.0,
+            bank_amount: 1.0,
         }
     }
 }
@@ -112,7 +116,7 @@ pub struct SimParams {
     pub camera_pos: [f32; 4], // w = camera repel radius
     pub camera_repel_strength: f32,
     pub tex_width: f32,
-    pub _pad0: f32,
+    pub bank_amount: f32, // banking roll gain (cosmetic; the stored bank lands in vel.w)
     pub _pad1: f32,
 }
 
@@ -171,7 +175,7 @@ impl Settings {
             ],
             camera_repel_strength: self.camera_repel_strength,
             tex_width: (num_birds as f32).sqrt().ceil(),
-            _pad0: 0.0,
+            bank_amount: self.bank_amount,
             _pad1: 0.0,
         }
     }

@@ -238,7 +238,29 @@ fn velocity_update(@builtin(global_invocation_id) gid: vec3<u32>) {
         velocity = normalize(velocity) * limit;
     }
 
-    vel_out[i] = vec4<f32>(velocity, 0.0);
+    // === Banking: roll into horizontal turns — the source of murmuration
+    // "dark bands" (a banking bird flashes more/less wing area to the viewer).
+    // COSMETIC: stored in vel.w and read by the bird vertex shader; the position
+    // integrator uses only vel.xyz, so this can never affect the sim. Smoothed
+    // through the previous tick's bank (vel_in[i].w) for ease-in/out.
+    var bank = vel_in[i].w;
+    {
+        let sp = length(velocity);
+        var bank_target = 0.0;
+        if (sp > 0.0001 && p.bank_amount > 0.0) {
+            let heading = velocity / sp;
+            let r = cross(heading, vec3<f32>(0.0, 1.0, 0.0));
+            let rlen = length(r);
+            if (rlen > 0.001) {
+                let right = r / rlen;
+                let dv = velocity - pre_steer_velocity; // net steering this tick
+                let lateral = dot(dv, right) / dt;      // signed lateral accel
+                bank_target = clamp(lateral * p.bank_amount * 0.15, -0.9, 0.9);
+            }
+        }
+        bank = mix(bank, bank_target, 0.06);
+    }
+    vel_out[i] = vec4<f32>(velocity, bank);
 }
 
 
