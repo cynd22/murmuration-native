@@ -44,6 +44,9 @@ struct Args {
     win: Option<(u32, u32)>,
     /// Start with all sky effects off (isolate the fullscreen sky cost).
     no_sky: bool,
+    /// Sky render-resolution divisor: 1=full, 2=half (default), 4=quarter
+    /// (near-free sky for weak GPUs). Clamped to 1..=8.
+    sky_div: u32,
 }
 
 fn parse_args() -> Args {
@@ -57,6 +60,7 @@ fn parse_args() -> Args {
         bench: None,
         win: None,
         no_sky: false,
+        sky_div: render::SKY_DIV_DEFAULT,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -72,6 +76,12 @@ fn parse_args() -> Args {
             "--device" => args.device = it.next(),
             "--list-devices" => args.list_devices = true,
             "--no-sky" => args.no_sky = true,
+            "--sky-div" => {
+                args.sky_div = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(args.sky_div)
+            }
             "--bench" => {
                 args.bench = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or(6.0))
             }
@@ -102,6 +112,7 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     sim: sim::Sim,
     renderer: render::Renderer,
+    sky_div: u32,
     fluid: fluid::Fluid,
     fluid_settings: fluid::FluidSettings,
     fluid_acc: f64,
@@ -220,6 +231,7 @@ impl State {
             &sim,
             &fluid,
             &sources,
+            args.sky_div,
         )
         .unwrap_or_else(|e| panic!("initial render shader compile failed:\n{e}"));
 
@@ -249,6 +261,7 @@ impl State {
             config,
             sim,
             renderer,
+            sky_div: args.sky_div,
             fluid,
             fluid_settings: fluid::FluidSettings::default(),
             fluid_acc: 0.0,
@@ -338,6 +351,7 @@ impl State {
                 &new_sim,
                 &self.fluid,
                 &self.sources,
+                self.sky_div,
             ) {
                 Ok(new_renderer) => {
                     self.sim = new_sim;

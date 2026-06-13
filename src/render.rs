@@ -131,6 +131,7 @@ pub struct Renderer {
     blit_bgl: wgpu::BindGroupLayout,
     blit_bg: wgpu::BindGroup,
     blit_pipeline: wgpu::RenderPipeline,
+    sky_div: u32,
     depth: wgpu::TextureView,
     format: wgpu::TextureFormat,
     n: u32,
@@ -145,6 +146,7 @@ impl Renderer {
         sim: &crate::sim::Sim,
         fluid: &crate::fluid::Fluid,
         sources: &Sources,
+        sky_div: u32,
     ) -> Result<Self, wgpu::Error> {
         let uniforms_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render uniforms"),
@@ -244,7 +246,7 @@ impl Renderer {
         let (bird_pipeline, ground_pipeline, background_pipeline) =
             build_pipelines(device, &layout, format, sources)?;
 
-        let (sky_tex, sky_view) = create_sky_target(device, format, width, height);
+        let (sky_tex, sky_view) = create_sky_target(device, format, width, height, sky_div);
         let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sky upscale sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -290,6 +292,7 @@ impl Renderer {
             blit_bgl,
             blit_bg,
             blit_pipeline,
+            sky_div,
             depth: create_depth(device, width, height),
             format,
             n: sim.n,
@@ -307,7 +310,7 @@ impl Renderer {
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = create_depth(device, width, height);
-        let (sky_tex, sky_view) = create_sky_target(device, self.format, width, height);
+        let (sky_tex, sky_view) = create_sky_target(device, self.format, width, height, self.sky_div);
         self.sky_tex = sky_tex;
         self.sky_view = sky_view;
         self.blit_bg = make_blit_bg(device, &self.blit_bgl, &self.sky_view, &self.sky_sampler);
@@ -497,7 +500,7 @@ fn build_pipelines(
     }
 }
 
-const SKY_DIV: u32 = 2; // sky rendered at 1/SKY_DIV resolution, then upscaled
+pub const SKY_DIV_DEFAULT: u32 = 2; // sky rendered at 1/div resolution, then upscaled
 
 // Standalone upscale-blit shader (separate module so its group-0 texture/sampler
 // don't collide with the RenderUniforms binding in the bird+background module).
@@ -526,12 +529,14 @@ fn create_sky_target(
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
+    div: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    let div = div.clamp(1, 8);
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sky half-res target"),
         size: wgpu::Extent3d {
-            width: (width / SKY_DIV).max(1),
-            height: (height / SKY_DIV).max(1),
+            width: (width / div).max(1),
+            height: (height / div).max(1),
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
