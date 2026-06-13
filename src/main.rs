@@ -26,7 +26,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 struct Args {
     birds: u32,
@@ -47,6 +47,8 @@ struct Args {
     /// Sky render-resolution divisor: 1=full, 2=half (default), 4=quarter
     /// (near-free sky for weak GPUs). Clamped to 1..=8.
     sky_div: u32,
+    /// Launch straight into borderless fullscreen (projector / showing).
+    fullscreen: bool,
 }
 
 fn parse_args() -> Args {
@@ -61,6 +63,7 @@ fn parse_args() -> Args {
         win: None,
         no_sky: false,
         sky_div: render::SKY_DIV_DEFAULT,
+        fullscreen: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -76,6 +79,7 @@ fn parse_args() -> Args {
             "--device" => args.device = it.next(),
             "--list-devices" => args.list_devices = true,
             "--no-sky" => args.no_sky = true,
+            "--fullscreen" => args.fullscreen = true,
             "--sky-div" => {
                 args.sky_div = it
                     .next()
@@ -141,6 +145,11 @@ struct State {
     bench_secs: Option<f64>,
     bench_start: Option<Instant>,
     bench_dts: Vec<f32>,
+
+    // Fullscreen + cursor auto-hide (projector mode).
+    fullscreen: bool,
+    last_cursor_move: Instant,
+    cursor_hidden: bool,
 }
 
 impl State {
@@ -149,6 +158,11 @@ impl State {
         let attrs = match args.win {
             Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1600, 900)),
+        };
+        let attrs = if args.fullscreen {
+            attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
+        } else {
+            attrs
         };
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -287,6 +301,35 @@ impl State {
             bench_secs: args.bench,
             bench_start: None,
             bench_dts: Vec::new(),
+            fullscreen: args.fullscreen,
+            last_cursor_move: Instant::now(),
+            cursor_hidden: false,
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+        self.window.set_fullscreen(if self.fullscreen {
+            Some(Fullscreen::Borderless(None))
+        } else {
+            None
+        });
+    }
+
+    /// Mouse moved — show the cursor and reset the idle timer.
+    fn wake_cursor(&mut self) {
+        self.last_cursor_move = Instant::now();
+        if self.cursor_hidden {
+            self.window.set_cursor_visible(true);
+            self.cursor_hidden = false;
+        }
+    }
+
+    /// Hide the cursor after ~5s of stillness (called each frame).
+    fn idle_cursor(&mut self) {
+        if !self.cursor_hidden && self.last_cursor_move.elapsed().as_secs_f32() > 5.0 {
+            self.window.set_cursor_visible(false);
+            self.cursor_hidden = true;
         }
     }
 
@@ -365,6 +408,7 @@ impl State {
     }
 
     fn frame(&mut self) {
+        self.idle_cursor();
         self.hot_reload();
         if self.ui_state.apply_birds {
             self.ui_state.apply_birds = false;
@@ -576,6 +620,18 @@ impl ApplicationHandler for App {
             } if !ui_consumed && c.eq_ignore_ascii_case("p") => {
                 state.ui_state.now_playing_visible = !state.ui_state.now_playing_visible;
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Character(ref c),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } if !ui_consumed && c.eq_ignore_ascii_case("f") => {
+                state.toggle_fullscreen();
+            }
+            WindowEvent::CursorMoved { .. } => state.wake_cursor(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.frame(),
             _ => {}

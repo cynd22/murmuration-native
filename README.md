@@ -127,8 +127,10 @@ playback for real. Press **P** to toggle it (independent of the H control panel)
 ## Controls
 
 Press **H** to show/hide the control panel and all chrome — during playback
-there's nothing on screen but the flock and the sky. Press **P** to toggle the
-now-playing card on its own.
+there's nothing on screen but the flock and the sky. **F** toggles fullscreen
+(borderless), and **P** toggles the now-playing card. The cursor hides itself
+after ~5 seconds of stillness and reappears the instant you move it — so a
+projector showing is just flock and sky.
 
 The panel has live sliders for:
 
@@ -150,6 +152,7 @@ cargo run --release -- --birds 100000    # bigger flock (default is 50,000)
 cargo run --release -- --uncapped        # disable vsync (benchmark / >60Hz displays)
 cargo run --release -- --sky-div 4       # cheap quarter-res sky (weak / integrated GPUs)
 cargo run --release -- --no-sky          # start with the sky off entirely
+cargo run --release -- --fullscreen      # launch straight into fullscreen (projector / showing)
 cargo run --release -- --sim-hz 120      # change the fixed simulation tick rate
 cargo run --release -- --list-devices    # list audio inputs and exit
 cargo run --release -- --device "monitor"  # force a capture device by name
