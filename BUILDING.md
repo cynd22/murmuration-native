@@ -17,10 +17,15 @@ supported, picked at runtime). You need a working Vulkan driver, the Vulkan
 loader, and libxkbcommon; Wayland users also need the Wayland client library
 (almost certainly already installed on any Wayland desktop).
 
+It also captures system audio (ALSA, via cpal) and reads now-playing metadata
+(D-Bus / MPRIS), so it needs the **ALSA** and **D-Bus** development headers at
+build time. No Python or external feeder is required — capture is in-process.
+
 ### Arch
 
 ```sh
-sudo pacman -S --needed gcc pkgconf libxkbcommon wayland vulkan-icd-loader
+sudo pacman -S --needed gcc pkgconf libxkbcommon wayland vulkan-icd-loader \
+               alsa-lib dbus
 # plus the Vulkan driver for your GPU:
 sudo pacman -S vulkan-radeon        # AMD
 sudo pacman -S vulkan-intel         # Intel
@@ -31,7 +36,7 @@ sudo pacman -S nvidia-utils         # NVIDIA (proprietary driver)
 
 ```sh
 sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev \
-                 libvulkan1 mesa-vulkan-drivers
+                 libvulkan1 mesa-vulkan-drivers libasound2-dev libdbus-1-dev
 ```
 
 `mesa-vulkan-drivers` covers AMD and Intel GPUs. On NVIDIA, the proprietary
@@ -42,7 +47,7 @@ driver packages (`nvidia-driver-*`) ship their own Vulkan ICD — you still want
 
 ```sh
 sudo dnf install gcc pkgconf-pkg-config libxkbcommon-devel wayland-devel \
-                 vulkan-loader mesa-vulkan-drivers
+                 vulkan-loader mesa-vulkan-drivers alsa-lib-devel dbus-devel
 ```
 
 Same NVIDIA note as above: with the RPM Fusion NVIDIA driver you get the
@@ -86,18 +91,34 @@ to wherever you launch it from.
 | `--birds N` | flock size | 10000 |
 | `--uncapped` | disable vsync (benchmarking / high-refresh displays) | vsync on |
 | `--sim-hz N` | fixed simulation tick rate | 240 |
-| `--ws URL` | audio feeder websocket URL | `ws://localhost:8766` |
+| `--list-devices` | print audio input devices (monitors marked) and exit | — |
+| `--device SUBSTR` | force a capture device by name substring | auto (monitor) |
+| `--ws URL` | use an external feeder instead of native capture | native capture |
 
-`Esc` quits. FPS is shown in the title bar.
+`Esc` quits. `H` toggles the control panel, `P` toggles the now-playing card.
+FPS is shown in the title bar.
 
-## 5. Audio (optional)
+## 5. Audio
 
-The visualiser runs fine without audio — the flock just flies on its baseline
-forces. To drive it with music, it expects a feeder pushing per-band FFT
-amplitudes + onsets over a websocket (default `ws://localhost:8766`); the app
-auto-connects and retries every second, with `audio ✓/✗` in the title bar.
+Capture is **native and automatic** — the app records your system output via
+cpal/ALSA and runs the full FFT/onset/beat analysis in-process. On
+PipeWire/PulseAudio it auto-selects your default sink's *monitor*, so just play
+something and the flock reacts (`audio ✓` in the title bar). No feeder, no Python.
 
-The feeder ships separately as part of the parent project — see
-[cynd22/murmuration-visualiser](https://github.com/cynd22/murmuration-visualiser),
-which includes a feeder implementation (system-audio capture → FFT bands →
-websocket). Any feeder that speaks the same JSON band/onset format works.
+If auto-selection grabs the wrong input on an unusual setup:
+
+```sh
+./murmuration --list-devices                 # see inputs; monitors are marked
+./murmuration --device "monitor"             # force one by name substring
+# or set the recording source system-wide:
+pactl set-default-source $(pactl get-default-sink).monitor
+# or pick "Monitor of ..." in pavucontrol -> Recording
+```
+
+Advanced: `--ws ws://host:8766` makes the app consume an external feeder over a
+websocket instead (the JSON band/onset format used by the parent
+[cynd22/murmuration-visualiser](https://github.com/cynd22/murmuration-visualiser)),
+e.g. to drive it from another machine.
+
+The now-playing card (title/artist/art/transport, `P` to toggle) reads any
+MPRIS-compatible player over D-Bus — VLC, mpv, browsers, Spotify, and so on.

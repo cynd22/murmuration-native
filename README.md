@@ -61,38 +61,47 @@ cargo run --release
 The first build downloads and compiles dependencies and takes a few minutes —
 that's normal, it's a one-time cost. After that it launches in a second or two.
 
-> **It runs fine with no music** — you'll get a calm, drifting flock. To make it
-> react to whatever you're playing, start the audio feeder (next section).
+> **Just play music and it reacts** — no setup, no extra process. The
+> visualiser captures your system audio itself (see below). With nothing
+> playing you get a calm, drifting flock.
 
 Full per-distro detail, NVIDIA/Optimus troubleshooting, and CI build notes live
 in [BUILDING.md](BUILDING.md).
 
 ---
 
-## Make it react to your music
+## Audio — it just works
 
-The visualiser listens on a websocket for audio analysis. A small Python
-"feeder" captures your system audio (whatever's playing — Spotify, a browser,
-anything), does the frequency + beat analysis, and streams it over.
+The visualiser captures your **system audio** directly (via cpal) — whatever
+you're playing through your speakers/headphones: Spotify, a browser, a local
+player, anything. No feeder, no Python, no config. On PipeWire/PulseAudio it
+auto-selects your output's *monitor* source, so the title bar shows `audio ✓`
+the moment something plays.
+
+If it ever grabs the wrong input (e.g. a mic on an unusual setup):
 
 ```sh
-cd feeder
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python feeder_onsets.py
+cargo run --release -- --list-devices         # see inputs; monitors are marked
+cargo run --release -- --device "<substring>" # force a specific one
 ```
 
-Then launch the visualiser in another terminal. It auto-connects to
-`ws://localhost:8766` (reconnecting once a second until the feeder appears) and
-shows `audio ✓` in the title bar. See [feeder/README.md](feeder/README.md) for
-capture-source notes.
+Fallbacks if no monitor is auto-found: `pactl set-default-source $(pactl get-default-sink).monitor`,
+or pick "Monitor of …" in `pavucontrol` → Recording.
+
+### Now playing
+
+A bottom-right card shows the current track (title, artist, album, album art) with
+a seekable position bar and prev / play-pause / next buttons — driven over **MPRIS**,
+so it works with any Linux player (VLC, mpv, browsers, Spotify, …) and controls
+playback for real. Press **P** to toggle it (independent of the H control panel).
 
 ---
 
 ## Controls
 
-Press **H** to show/hide the control panel — and **everything else** with it, so
-during playback there's nothing on screen but the flock and the sky.
+Press **H** to show/hide the control panel and all chrome — during playback
+there's nothing on screen but the flock and the sky. Press **P** to toggle the
+now-playing card on its own.
 
 The panel has live sliders for:
 
@@ -112,7 +121,9 @@ Command-line flags:
 cargo run --release -- --birds 50000     # start with a bigger flock
 cargo run --release -- --uncapped        # disable vsync (benchmark / >60Hz displays)
 cargo run --release -- --sim-hz 120      # change the fixed simulation tick rate
-cargo run --release -- --ws ws://host:8766   # point at a feeder elsewhere
+cargo run --release -- --list-devices    # list audio inputs and exit
+cargo run --release -- --device "monitor"  # force a capture device by name
+cargo run --release -- --ws ws://host:8766 # advanced: use an external feeder instead of native capture
 ```
 
 `Esc` quits.
@@ -143,10 +154,14 @@ different rather than converging on one "visualiser look."
   confident the plumes *pump in beat phase*. Silence → the sky settles and
   fades. The dye is lit by the same palette as the birds, so sky and flock share
   one colour identity and the dark trough owns the whole frame.
-- **Beat tracking** — the feeder estimates tempo/phase/confidence from the onset
-  novelty; the visualiser breathes the horizon glow and pumps the fluid plumes
-  on the beat, and ignores it gracefully on beatless/ambient material (confidence
-  falls to zero).
+- **Aurora borealis** — an optional corona-view aurora across the top of the sky
+  (real green→teal→magenta colours, rays converging overhead, driven by the same
+  fluid field + bass/beat). Independent on/off from the plumes; both in the sky
+  panel.
+- **Beat tracking** — an autocorrelation tempo tracker estimates BPM/phase/
+  confidence from the onset novelty; the visualiser breathes the horizon glow and
+  pumps the fluid plumes on the beat, and ignores it gracefully on beatless/
+  ambient material (confidence falls to zero).
 
 ---
 
@@ -196,11 +211,13 @@ rarely need to touch. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Status
 
 - [x] GPU boid sim, bird + ground rendering, WGSL hot reload, fixed timestep
-- [x] Feeder websocket client, smoothing layer, full band→uniform mappings
-- [x] egui control panel (`H` hides everything), live flock-size slider
+- [x] Native system-audio capture (cpal) + full DSP in-process — no external feeder
+- [x] Smoothing layer + full band→uniform mappings; optional `--ws` external feeder
+- [x] egui control panel (`H` hides chrome), live flock-size slider
 - [x] Solo-contrast upperMid mode with live diagnostics
-- [x] Realtime beat tracking in the feeder (tempo / phase / confidence)
-- [x] Audio-reactive sky: procedural clouds, stars, and a beat-driven fluid sim
+- [x] Realtime autocorrelation beat tracking (tempo / phase / confidence)
+- [x] Audio-reactive sky: procedural clouds, stars, fluid plumes, aurora borealis
+- [x] MPRIS now-playing card with transport + seek (`P` toggles)
 - [ ] Save/load presets (TOML)
 
 ---
