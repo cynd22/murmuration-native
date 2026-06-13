@@ -88,6 +88,7 @@ pub struct FrameStyle {
     pub bands: [f32; 4], // smoothed subBass, bass, mid, air
     pub beat: [f32; 4],  // phase, confidence, bpm/200, time seconds
     pub bg: [f32; 4],    // intensity, clouds, stars, beat pulse
+    pub bg2: [f32; 4],   // fluid mix, fluid heat glow, unused, unused
 }
 
 #[repr(C)]
@@ -111,6 +112,7 @@ struct RenderUniforms {
     bands: [f32; 4],
     beat: [f32; 4],
     bg: [f32; 4],
+    bg2: [f32; 4],
 }
 
 pub struct Renderer {
@@ -132,6 +134,7 @@ impl Renderer {
         width: u32,
         height: u32,
         sim: &crate::sim::Sim,
+        fluid: &crate::fluid::Fluid,
         sources: &Sources,
     ) -> Result<Self, wgpu::Error> {
         let uniforms_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -174,6 +177,22 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -193,6 +212,14 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: sim.vel[cur].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&fluid.display_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&fluid.sampler_render),
                     },
                 ],
             })
@@ -257,6 +284,7 @@ impl Renderer {
             bands: style.bands,
             beat: style.beat,
             bg: style.bg,
+            bg2: style.bg2,
         };
         queue.write_buffer(&self.uniforms_buf, 0, bytemuck::bytes_of(&u));
     }

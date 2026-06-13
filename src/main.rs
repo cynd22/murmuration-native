@@ -9,6 +9,7 @@
 //! Flags: --birds N (default 10000), --uncapped (no vsync), --sim-hz N (default 240).
 
 mod audio;
+mod fluid;
 mod hot;
 mod params;
 mod render;
@@ -73,6 +74,9 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     sim: sim::Sim,
     renderer: render::Renderer,
+    fluid: fluid::Fluid,
+    fluid_settings: fluid::FluidSettings,
+    fluid_acc: f64,
     settings: params::Settings,
     audio: audio::AudioEngine,
     // Last tick's driven values — read at render time (most frames run zero
@@ -166,12 +170,15 @@ impl State {
         let sources = hot::Sources::load(&shader_dir).expect("read shaders");
         let sim = sim::Sim::new(&device, args.birds, &sources)
             .unwrap_or_else(|e| panic!("initial sim shader compile failed:\n{e}"));
+        let fluid = fluid::Fluid::new(&device, &sources)
+            .unwrap_or_else(|e| panic!("initial fluid shader compile failed:\n{e}"));
         let renderer = render::Renderer::new(
             &device,
             format,
             config.width,
             config.height,
             &sim,
+            &fluid,
             &sources,
         )
         .unwrap_or_else(|e| panic!("initial render shader compile failed:\n{e}"));
@@ -195,6 +202,9 @@ impl State {
             config,
             sim,
             renderer,
+            fluid,
+            fluid_settings: fluid::FluidSettings::default(),
+            fluid_acc: 0.0,
             settings: params::Settings::default(),
             audio: audio::AudioEngine::new(args.ws_url.clone()),
             last_driven: audio::Driven {
@@ -235,6 +245,10 @@ impl State {
                     Ok(()) => log::info!("render shaders reloaded"),
                     Err(e) => log::error!("render shader error (keeping old):\n{e}"),
                 }
+                match self.fluid.rebuild(&self.device, &sources) {
+                    Ok(()) => log::info!("fluid shaders reloaded"),
+                    Err(e) => log::error!("fluid shader error (keeping old):\n{e}"),
+                }
                 self.sources = sources;
             }
             Err(e) => log::error!("shader read failed: {e}"),
@@ -251,6 +265,7 @@ impl State {
                 self.config.width,
                 self.config.height,
                 &new_sim,
+                &self.fluid,
                 &self.sources,
             ) {
                 Ok(new_renderer) => {
@@ -346,10 +361,27 @@ impl State {
                 self.sim_time_s as f32,
             ],
             bg: self.ui_state.bg(),
+            bg2: [self.ui_state.fluid_mix, self.ui_state.fluid_heat, 0.0, 0.0],
         };
         self.renderer.update_uniforms(&self.queue, aspect, &style);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        // Fluid sky: fixed 60 Hz on its own accumulator (drop backlog on stall).
+        self.fluid_acc = (self.fluid_acc + frame_dt).min(0.1);
+        if self.fluid_acc >= 1.0 / 60.0 && self.ui_state.fluid_mix > 0.001 {
+            self.fluid_acc -= 1.0 / 60.0;
+            self.fluid.step(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                1.0 / 60.0,
+                &d,
+                &self.fluid_settings,
+                self.sim_time_s as f32,
+            );
+        }
+
         self.renderer.render(&mut encoder, &view, self.sim.flip);
         self.ui.run_and_paint(
             &self.device,
@@ -361,6 +393,7 @@ impl State {
             &mut self.ui_state,
             &mut self.audio.mapping,
             &mut self.settings,
+            &mut self.fluid_settings,
             &d,
             self.fps_current,
             self.sim.n,

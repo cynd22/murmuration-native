@@ -287,6 +287,11 @@ pub struct Driven {
     pub um_raw: f32,
     pub um_baseline: f32,
     pub um_t: f32,
+    // Raw per-band onset envelopes (feeder-computed, 0..1, decay ~0.5s) —
+    // the fluid sky's percussion inputs.
+    pub onset_sub: f32,
+    pub onset_bass: f32,
+    pub onset_treble: f32,
 }
 
 #[derive(Default)]
@@ -525,6 +530,9 @@ impl AudioEngine {
             um_raw: self.sm.upper_mid,
             um_baseline: self.sm.upper_mid_baseline,
             um_t: t_upper_mid,
+            onset_sub: envelopes.sub_bass,
+            onset_bass: envelopes.bass,
+            onset_treble: envelopes.treble,
         }
     }
 }

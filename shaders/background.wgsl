@@ -17,6 +17,10 @@
 // Everything is multiplied by bg.x (master intensity) — 0 restores the flat
 // classic sky exactly.
 
+// Fluid sky field — dye.x = cloud density, dye.y = heat (fresh injection).
+@group(0) @binding(3) var fluid_tex: texture_2d<f32>;
+@group(0) @binding(4) var fluid_samp: sampler;
+
 fn hash21(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(123.34, 456.21));
     q += dot(q, q + 45.32);
@@ -115,19 +119,50 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
         }
     }
 
+    // === Fluid layer. The stable-fluids dye field, screen-aligned, masked to
+    // the sky. Density is lit by the shared palette (dark-trough applies);
+    // heat (recent injection) adds a brighter core so fresh sub-bass plumes
+    // read as glowing thermals that cool as they rise and disperse.
+    if (u.bg2.x > 0.001) {
+        let fuv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 1.0 - (in.ndc.y * 0.5 + 0.5));
+        let f = textureSampleLevel(fluid_tex, fluid_samp, fuv, 0.0);
+        let density = clamp(f.x, 0.0, 2.0);
+        let heat = clamp(f.y, 0.0, 2.0);
+        let sky_mask = smoothstep(-0.02, 0.12, dir.y);
+        // Heat shifts hue along the SAME palette family — fresh kick plumes
+        // arrive in a sibling colour and settle back into the haze tint as
+        // they cool. Curated-family variation, never full-RGB.
+        let pal_hot = palette(u.palette_t + heat * 0.18, u.palette_a.xyz, u.palette_b.xyz, u.palette_c.xyz, u.palette_d.xyz);
+        let fluid_light = pal_hot * (0.18 + 0.5 * heat) * u.palette_intensity + sky * 0.3;
+        let amount = clamp(density * u.bg2.x, 0.0, 1.0) * sky_mask * u.bg.x;
+        col = mix(col, fluid_light, amount);
+        // Heat cores push a little extra light additively.
+        col += pal_hot * heat * u.bg2.y * 0.15 * sky_mask * u.bg.x;
+    }
+
     // Horizon storm-glow: subBass lifts light along the horizon; the beat
     // breathes it when the tracker is confident. pow shapes the pulse so it
     // taps on the beat instant rather than sloshing sinusoidally.
     let pulse = pow(0.5 + 0.5 * cos(u.beat.x * 6.28318), 3.0);
     let beat_breathe = 1.0 + u.bg.w * u.beat.y * (pulse - 0.5);
     let glow_strength = (0.12 + 0.9 * sub_bass) * beat_breathe;
-    let glow = pal * glow_strength * pow(horizon_band, 3.0) * 0.45;
+    // Glow hue rides subBass the same way the birds' palette rides bass —
+    // hits push the horizon along the palette family, releases settle it back.
+    let pal_glow = palette(u.palette_t + sub_bass * 0.14, u.palette_a.xyz, u.palette_b.xyz, u.palette_c.xyz, u.palette_d.xyz);
+    let glow = pal_glow * glow_strength * pow(horizon_band, 3.0) * 0.45;
     col += glow * u.bg.x;
 
     // Below the horizon fade toward the ground colour so the plane blends in.
     if (dir.y < 0.0) {
         col = mix(col, vec3<f32>(0.01569, 0.03529, 0.07059), clamp(-dir.y * 6.0, 0.0, 1.0));
     }
+
+    // Sub-LSB dither: the sky is slow, dark gradients on an 8-bit surface —
+    // banding is guaranteed without this. ±0.5/255 hash noise is invisible
+    // as noise but completely breaks the bands. Time-varying so the noise
+    // never reads as a static texture.
+    let dither = (hash21(in.ndc * vec2<f32>(1741.3, 921.7) + fract(u.beat.w) * 13.7) - 0.5) * (1.6 / 255.0);
+    col += vec3<f32>(dither);
 
     return vec4<f32>(col, 1.0);
 }

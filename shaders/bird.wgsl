@@ -27,6 +27,7 @@ struct RenderUniforms {
     bands: vec4<f32>,  // smoothed (subBass, bass, mid, air)
     beat: vec4<f32>,   // (phase 0..1, confidence, bpm/200, time seconds)
     bg: vec4<f32>,     // (intensity, cloud amount, star amount, beat-pulse amount)
+    bg2: vec4<f32>,    // (fluid mix, fluid heat glow, unused, unused)
 }
 
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
@@ -184,5 +185,10 @@ fn vs_ground(@builtin(vertex_index) vi: u32) -> GroundOut {
 @fragment
 fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     let f = clamp((in.fog_depth - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
-    return vec4<f32>(mix(GROUND_COLOR, SKY_COLOR, f), 1.0);
+    var col = mix(GROUND_COLOR, SKY_COLOR, f);
+    // Sub-LSB dither — the fog ramp bands on 8-bit output without it.
+    var q = fract(in.clip.xy * vec2<f32>(0.1031, 0.1369) + fract(u.time * 0.001));
+    q += dot(q, q.yx + 33.33);
+    col += vec3<f32>((fract((q.x + q.y) * q.x) - 0.5) * (1.6 / 255.0));
+    return vec4<f32>(col, 1.0);
 }

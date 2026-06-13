@@ -3,6 +3,7 @@
 //! sit quietly over the dusk sky.
 
 use crate::audio::{Driven, Mapping};
+use crate::fluid::FluidSettings;
 use crate::params::Settings;
 use crate::render::{CamSettings, PALETTE_PRESETS};
 use winit::window::Window;
@@ -16,6 +17,8 @@ pub struct UiState {
     pub bg_clouds: f32,
     pub bg_stars: f32,
     pub bg_beat_pulse: f32,
+    pub fluid_mix: f32,  // how strongly the fluid dye shows in the sky
+    pub fluid_heat: f32, // extra additive glow on fresh (hot) plumes
     pub pending_birds: u32,
     pub apply_birds: bool,
     pub um_baseline_secs: f32, // UI-friendly form of Mapping::um_baseline_alpha
@@ -32,6 +35,8 @@ impl UiState {
             bg_clouds: 0.7,
             bg_stars: 0.7,
             bg_beat_pulse: 0.6,
+            fluid_mix: 0.85,
+            fluid_heat: 1.0,
             pending_birds: birds,
             apply_birds: false,
             um_baseline_secs: 6.0,
@@ -111,6 +116,7 @@ impl Ui {
         state: &mut UiState,
         mapping: &mut Mapping,
         settings: &mut Settings,
+        fluid: &mut FluidSettings,
         diag: &Driven,
         fps: f32,
         birds: u32,
@@ -120,7 +126,7 @@ impl Ui {
         let visible = state.visible;
         let out = self.ctx.run_ui(raw, |ctx| {
             if visible {
-                panel(ctx, state, mapping, settings, diag, fps, birds, sim_hz);
+                panel(ctx, state, mapping, settings, fluid, diag, fps, birds, sim_hz);
             }
         });
         self.winit_state
@@ -169,6 +175,7 @@ fn panel(
     state: &mut UiState,
     m: &mut Mapping,
     s: &mut Settings,
+    fl: &mut FluidSettings,
     d: &Driven,
     fps: f32,
     birds: u32,
@@ -278,12 +285,21 @@ fn panel(
             });
 
             // === Background.
-            egui::CollapsingHeader::new("sky").show(ui, |ui| {
-                slider(ui, &mut state.bg_intensity, 0.0..=1.5, "sky effects (0 = classic)");
-                slider(ui, &mut state.bg_clouds, 0.0..=1.5, "clouds");
-                slider(ui, &mut state.bg_stars, 0.0..=1.5, "stars");
-                slider(ui, &mut state.bg_beat_pulse, 0.0..=1.5, "beat pulse (needs BPM lock)");
-            });
+            egui::CollapsingHeader::new("sky")
+                .default_open(true)
+                .show(ui, |ui| {
+                    slider(ui, &mut state.bg_intensity, 0.0..=1.5, "sky effects (0 = classic)");
+                    slider(ui, &mut state.bg_clouds, 0.0..=1.5, "procedural clouds");
+                    slider(ui, &mut state.bg_stars, 0.0..=1.5, "stars");
+                    slider(ui, &mut state.bg_beat_pulse, 0.0..=1.5, "beat pulse (needs BPM lock)");
+                    ui.separator();
+                    ui.label("fluid sky (audio-forced):");
+                    slider(ui, &mut state.fluid_mix, 0.0..=1.5, "fluid amount (0 = off)");
+                    slider(ui, &mut state.fluid_heat, 0.0..=2.0, "plume heat glow");
+                    slider(ui, &mut fl.plume, 0.0..=3.0, "injection strength");
+                    slider(ui, &mut fl.vorticity, 0.0..=40.0, "swirl (vorticity)");
+                    slider(ui, &mut fl.dye_keep, 0.97..=0.999, "cloud lifetime");
+                });
 
             // === Camera.
             egui::CollapsingHeader::new("camera").show(ui, |ui| {

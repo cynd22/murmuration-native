@@ -15,6 +15,7 @@ pub struct Sources {
     pub position: String,
     pub bird: String,
     pub background: String,
+    pub fluid: String,
 }
 
 impl Sources {
@@ -27,6 +28,7 @@ impl Sources {
             position: read("position.wgsl")?,
             bird: read("bird.wgsl")?,
             background: read("background.wgsl")?,
+            fluid: read("fluid.wgsl")?,
         })
     }
 
