@@ -168,12 +168,21 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // Shader dir: works when run from rust-port/ or the project root.
-        let shader_dir = ["shaders", "rust-port/shaders"]
-            .iter()
-            .map(std::path::PathBuf::from)
+        // Shader dir resolution. An installed copy keeps shaders/ next to the
+        // binary, so it works launched from anywhere (app menu, any CWD); the
+        // dev tree falls back to CWD-relative paths (cargo run from rust-port/).
+        let mut shader_candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                shader_candidates.push(dir.join("shaders"));
+            }
+        }
+        shader_candidates.push(std::path::PathBuf::from("shaders"));
+        shader_candidates.push(std::path::PathBuf::from("rust-port/shaders"));
+        let shader_dir = shader_candidates
+            .into_iter()
             .find(|p| p.join("common.wgsl").exists())
-            .expect("shaders/ directory not found — run from rust-port/");
+            .expect("shaders/ not found (looked next to the binary and in ./shaders)");
 
         let sources = hot::Sources::load(&shader_dir).expect("read shaders");
         let sim = sim::Sim::new(&device, args.birds, &sources)
