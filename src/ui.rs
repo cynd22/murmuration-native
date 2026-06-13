@@ -26,6 +26,8 @@ pub struct UiState {
     pub pending_birds: u32,
     pub apply_birds: bool,
     pub um_baseline_secs: f32, // UI-friendly form of Mapping::um_baseline_alpha
+    pub preset_name: String,       // text-field input for saving a preset
+    pub preset_names: Vec<String>, // cached list of saved preset names (the dropdown)
 }
 
 impl UiState {
@@ -47,6 +49,8 @@ impl UiState {
             pending_birds: birds,
             apply_birds: false,
             um_baseline_secs: 6.0,
+            preset_name: String::new(),
+            preset_names: crate::presets::list(),
         }
     }
 
@@ -240,6 +244,43 @@ fn panel(
             });
             ui.add_space(4.0);
             ui.small("press H to hide everything");
+
+            // === Presets — save/load the whole look+tuning. Stored in
+            // ~/.config/murmuration/presets/ so they survive binary updates.
+            egui::CollapsingHeader::new("presets")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_label("load")
+                            .selected_text("pick a preset…")
+                            .show_ui(ui, |ui| {
+                                for name in state.preset_names.clone() {
+                                    if ui.selectable_label(false, name.as_str()).clicked() {
+                                        if let Some(p) = crate::presets::load(&name) {
+                                            crate::presets::apply(p, s, m, fl, state);
+                                        }
+                                    }
+                                }
+                            });
+                        if ui.button("↻").on_hover_text("refresh list").clicked() {
+                            state.preset_names = crate::presets::list();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.preset_name)
+                                .hint_text("name")
+                                .desired_width(150.0),
+                        );
+                        if ui.button("save").clicked() && !state.preset_name.trim().is_empty() {
+                            let preset = crate::presets::capture(s, m, fl, state);
+                            match crate::presets::save(&state.preset_name, &preset) {
+                                Ok(_) => state.preset_names = crate::presets::list(),
+                                Err(e) => log::error!("preset save failed: {e}"),
+                            }
+                        }
+                    });
+                });
 
             // === Performance.
             egui::CollapsingHeader::new("flock size").show(ui, |ui| {

@@ -16,8 +16,10 @@ pub const SKY: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
+use serde::{Deserialize, Serialize};
+
 /// Camera — defaults match cameraSettings in the HTML build; UI-adjustable.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct CamSettings {
     pub pov_height: f32,
     pub distance: f32,

@@ -14,7 +14,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Default, Clone, Copy)]
 pub struct Bands {
@@ -201,6 +201,7 @@ impl AudioClient {
 }
 
 /// All mapping tunables — values are the HTML build's Kiseia-tuned defaults.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Mapping {
     pub enabled: bool,
     // subBass → attract (fast asymmetric) + separation/verticality (slow symmetric)

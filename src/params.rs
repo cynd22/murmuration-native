@@ -16,7 +16,9 @@ pub const CELLS: u32 = GRID_X * GRID_Y * GRID_Z;
 // birds hash into real cells. If you change the box, change this too.
 pub const FLOCK_EXTENT: [f32; 3] = [800.0, 1300.0, 800.0];
 
-#[derive(Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub separation: f32,
     pub alignment: f32,

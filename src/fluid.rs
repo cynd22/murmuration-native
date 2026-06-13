@@ -29,7 +29,10 @@ struct FluidParams {
     splats: [[f32; 4]; 8],
 }
 
+use serde::{Deserialize, Serialize};
+
 /// UI-tunable fluid behaviour.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FluidSettings {
     pub vorticity: f32,
     pub dye_keep: f32,   // per-step dye keep factor (closer to 1 = longer-lived clouds)

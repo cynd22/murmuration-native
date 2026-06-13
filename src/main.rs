@@ -15,6 +15,7 @@ mod fluid;
 mod hot;
 mod nowplaying;
 mod params;
+mod presets;
 mod render;
 mod sim;
 mod ui;
