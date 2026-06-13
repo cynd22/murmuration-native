@@ -165,11 +165,17 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
     if (u.bg2.z > 0.001 && dir.y > 0.015) {
         let proj = dir.xz / (dir.y + 0.07); // converges overhead, streaks to horizon
         var dens = 0.0;
-        let STEPS = 5;
+        let STEPS = 7;
+        // Per-pixel animated jitter on each layer's depth position. The hard
+        // edges were the discrete depth steps reading as contour lines; offsetting
+        // the layer position by a per-pixel hash dissolves those steps into fine
+        // noise the eye averages into a smooth volume (classic layered-render
+        // dither). Animated so it never looks like a static grain.
+        let jit = hash21(in.ndc * 511.0 + fract(t_sec * 1.7) * 311.0);
         for (var k = 0; k < STEPS; k = k + 1) {
-            let fk = f32(k);
-            let scl = 0.55 + fk * 0.45;
-            let dr = vec2<f32>(t_sec * (0.018 + fk * 0.004), t_sec * 0.010);
+            let fk = f32(k) + jit;
+            let scl = 0.55 + fk * 0.32;
+            let dr = vec2<f32>(t_sec * (0.018 + fk * 0.003), t_sec * 0.010);
             // Domain-warped FBM -> free-flowing curtains that ripple and drift.
             let warp = fbm(proj * scl * 0.5 + dr);
             let d = fbm(proj * scl + vec2<f32>(warp * 1.3, warp * 0.6) - dr);
@@ -178,10 +184,11 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
                 fluid_tex, fluid_samp,
                 vec2<f32>(fract(proj.x * 0.04 + 0.5), fract(proj.y * 0.04 + 0.5)), 0.0
             ).x;
-            let curtain = pow(smoothstep(0.40, 0.92, d + fsamp * 0.10), 1.5);
+            let curtain = pow(smoothstep(0.38, 0.95, d + fsamp * 0.10), 1.4);
             // Nearer (lower) layers slightly stronger; far layers fade -> depth.
             dens += curtain * (1.0 - fk / f32(STEPS) * 0.55);
         }
+        dens = dens * (5.0 / f32(STEPS)); // renormalize to the old 5-step brightness
         // Fine vertical shimmer from treble/air; fade in over the upper sky.
         let shimmer = 1.0 + air * 0.5 * sin(proj.x * 5.0 + t_sec * 3.0);
         let height_mask = smoothstep(0.02, 0.15, dir.y);

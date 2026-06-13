@@ -9,8 +9,11 @@
 //! Flags: --birds N (default 10000), --uncapped (no vsync), --sim-hz N (default 240).
 
 mod audio;
+mod capture;
+mod dsp;
 mod fluid;
 mod hot;
+mod nowplaying;
 mod params;
 mod render;
 mod sim;
@@ -29,7 +32,12 @@ struct Args {
     birds: u32,
     uncapped: bool,
     sim_hz: f64,
-    ws_url: String,
+    /// External feeder URL. None = native in-process capture (the default).
+    ws_url: Option<String>,
+    /// Capture device name substring (native mode). None = auto-pick monitor.
+    device: Option<String>,
+    /// Print input devices and exit.
+    list_devices: bool,
 }
 
 fn parse_args() -> Args {
@@ -37,7 +45,9 @@ fn parse_args() -> Args {
         birds: 10_000,
         uncapped: false,
         sim_hz: 240.0,
-        ws_url: "ws://localhost:8766".to_string(),
+        ws_url: None,
+        device: None,
+        list_devices: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -49,11 +59,9 @@ fn parse_args() -> Args {
                     .unwrap_or(args.birds)
             }
             "--uncapped" => args.uncapped = true,
-            "--ws" => {
-                if let Some(v) = it.next() {
-                    args.ws_url = v;
-                }
-            }
+            "--ws" => args.ws_url = it.next(),
+            "--device" => args.device = it.next(),
+            "--list-devices" => args.list_devices = true,
             "--sim-hz" => {
                 args.sim_hz = it
                     .next()
@@ -206,7 +214,10 @@ impl State {
             fluid_settings: fluid::FluidSettings::default(),
             fluid_acc: 0.0,
             settings: params::Settings::default(),
-            audio: audio::AudioEngine::new(args.ws_url.clone()),
+            audio: match &args.ws_url {
+                Some(url) => audio::AudioEngine::websocket(url.clone()),
+                None => audio::AudioEngine::native(args.device.clone()),
+            },
             last_driven: audio::Driven {
                 palette_t: 0.11, // trough until audio arrives
                 ..Default::default()
@@ -466,6 +477,17 @@ impl ApplicationHandler for App {
             } if !ui_consumed && c.eq_ignore_ascii_case("h") => {
                 state.ui_state.visible = !state.ui_state.visible;
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Character(ref c),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } if !ui_consumed && c.eq_ignore_ascii_case("p") => {
+                state.ui_state.now_playing_visible = !state.ui_state.now_playing_visible;
+            }
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.frame(),
             _ => {}
@@ -482,6 +504,13 @@ impl ApplicationHandler for App {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args();
+
+    // --list-devices: print capture inputs (marking system-audio monitors) and exit.
+    if args.list_devices {
+        capture::list_devices();
+        return;
+    }
+
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop

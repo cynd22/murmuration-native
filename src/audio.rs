@@ -75,6 +75,20 @@ pub struct AudioClient {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// Map the dsp band array [subBass, bass, lowMid, mid, upperMid, treble, air]
+/// into the `Bands` struct the rest of the engine consumes.
+fn bands_from(a: &[f32; crate::dsp::N_BANDS]) -> Bands {
+    Bands {
+        sub_bass: a[0],
+        bass: a[1],
+        low_mid: a[2],
+        mid: a[3],
+        upper_mid: a[4],
+        treble: a[5],
+        air: a[6],
+    }
+}
+
 impl AudioClient {
     /// Spawns a background thread that connects (and reconnects, 1s backoff,
     /// same as the HTML) and keeps `shared` holding the latest frame.
@@ -121,6 +135,58 @@ impl AudioClient {
                 }
             }
             std::thread::sleep(Duration::from_secs(1));
+        });
+        Self { shared }
+    }
+
+    /// Native in-process source: cpal capture -> dsp (Analyser/OnsetDetector/
+    /// BeatTracker) -> the same `Shared` the websocket path fills. No external
+    /// feeder. cpal chunks (callback-sized) are accumulated into BLOCK_SIZE
+    /// frames before each DSP step.
+    pub fn native(device_substr: Option<String>) -> Self {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let ts = shared.clone();
+        std::thread::spawn(move || {
+            let cap = match crate::capture::start(device_substr) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("audio capture failed: {e}");
+                    return;
+                }
+            };
+            let sr = cap.sample_rate;
+            let frame_rate = sr as f32 / crate::dsp::BLOCK_SIZE as f32;
+            let mut analyser = crate::dsp::Analyser::new(sr);
+            let mut onset = crate::dsp::OnsetDetector::new();
+            let mut beat = crate::dsp::BeatTracker::new(frame_rate);
+            let mut acc: Vec<f32> = Vec::with_capacity(crate::dsp::BLOCK_SIZE * 2);
+            let start = Instant::now();
+            ts.lock().unwrap().connected = true;
+            while let Ok(chunk) = cap.rx.recv() {
+                acc.extend_from_slice(&chunk);
+                while acc.len() >= crate::dsp::BLOCK_SIZE {
+                    let block: Vec<f32> = acc.drain(..crate::dsp::BLOCK_SIZE).collect();
+                    let t = start.elapsed().as_secs_f32();
+                    let frame = analyser.process(&block);
+                    let on = onset.process(&frame.raw_bands, t);
+                    let bt = beat.process(on.novelty, t);
+                    let mut s = ts.lock().unwrap();
+                    s.bands = bands_from(&frame.bands);
+                    s.onset_envelopes = bands_from(&on.envelopes);
+                    s.beat = Some(BeatState {
+                        msg: BeatMsg {
+                            bpm: bt.bpm,
+                            period: bt.period,
+                            next_beat_in: bt.next_beat_in,
+                            confidence: bt.confidence,
+                        },
+                        received_at: Instant::now(),
+                    });
+                    s.last_msg = Some(Instant::now());
+                }
+            }
+            ts.lock().unwrap().connected = false;
+            log::warn!("audio capture ended");
         });
         Self { shared }
     }
@@ -325,7 +391,18 @@ fn ease(current: &mut f32, target: f32, alpha_60: f32, dt: f32) {
 }
 
 impl AudioEngine {
-    pub fn new(url: String) -> Self {
+    /// Native in-process capture + DSP (default). No external feeder needed.
+    pub fn native(device_substr: Option<String>) -> Self {
+        Self {
+            client: AudioClient::native(device_substr),
+            mapping: Mapping::default(),
+            sm: Smoothed::default(),
+        }
+    }
+
+    /// Optional: consume an external feeder over websocket (e.g. the HTML
+    /// build's Python feeder, or a remote machine). Used only with `--ws`.
+    pub fn websocket(url: String) -> Self {
         Self {
             client: AudioClient::connect(url),
             mapping: Mapping::default(),

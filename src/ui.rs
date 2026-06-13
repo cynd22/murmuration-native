@@ -4,12 +4,14 @@
 
 use crate::audio::{Driven, Mapping};
 use crate::fluid::FluidSettings;
+use crate::nowplaying::{Command, NowPlaying, NowPlayingClient};
 use crate::params::Settings;
 use crate::render::{CamSettings, PALETTE_PRESETS};
 use winit::window::Window;
 
 pub struct UiState {
     pub visible: bool,
+    pub now_playing_visible: bool,
     pub cam: CamSettings,
     pub palette_idx: usize,
     pub palette_intensity: f32,
@@ -29,6 +31,7 @@ impl UiState {
     pub fn new(birds: u32) -> Self {
         Self {
             visible: true,
+            now_playing_visible: true,
             cam: CamSettings::default(),
             palette_idx: 0, // ocean
             palette_intensity: 0.65,
@@ -59,6 +62,8 @@ pub struct Ui {
     pub ctx: egui::Context,
     winit_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
+    now_playing: NowPlayingClient,
+    np_art: Option<egui::TextureHandle>,
 }
 
 impl Ui {
@@ -99,6 +104,8 @@ impl Ui {
             ctx,
             winit_state,
             renderer,
+            now_playing: NowPlayingClient::connect(),
+            np_art: None,
         }
     }
 
@@ -124,13 +131,37 @@ impl Ui {
         birds: u32,
         sim_hz: f64,
     ) {
+        // Now-playing: upload the album-art texture only when the track changes
+        // (take_new_art returns Some once per change), then snapshot the rest
+        // cheaply. Transport-button clicks are collected and sent after the pass.
+        if let Some(art) = self.now_playing.take_new_art() {
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [art.width as usize, art.height as usize],
+                &art.rgba,
+            );
+            self.np_art =
+                Some(self.ctx.load_texture("np_art", img, egui::TextureOptions::LINEAR));
+        }
+        let np = self.now_playing.snapshot();
+        let np_art = self.np_art.clone();
+        let mut np_cmds: Vec<Command> = Vec::new();
+
         let raw = self.winit_state.take_egui_input(window);
         let visible = state.visible;
+        let np_visible = state.now_playing_visible;
         let out = self.ctx.run_ui(raw, |ctx| {
+            // Control panel toggles with H; the now-playing card toggles with P
+            // (independent — so you can hide the chrome but keep the music card).
             if visible {
                 panel(ctx, state, mapping, settings, fluid, diag, fps, birds, sim_hz);
             }
+            if np_visible {
+                now_playing_panel(ctx, &np, &np_art, &mut np_cmds);
+            }
         });
+        for c in np_cmds {
+            self.now_playing.send(c);
+        }
         self.winit_state
             .handle_platform_output(window, out.platform_output);
 
@@ -323,4 +354,160 @@ fn panel(
                 slider(ui, &mut s.max_speed, 3.0..=30.0, "max speed");
             });
         });
+}
+
+/// Bottom-right "now playing" card: large album art, title/artist/album,
+/// a seekable position bar with time labels, and prev / play-pause / next
+/// transport buttons. Button clicks and bar seeks are pushed into `cmds` and
+/// sent to the MPRIS player after the egui pass. Self-hides when no track.
+fn now_playing_panel(
+    ctx: &egui::Context,
+    np: &NowPlaying,
+    art: &Option<egui::TextureHandle>,
+    cmds: &mut Vec<Command>,
+) {
+    if np.title.is_empty() && np.artist.is_empty() {
+        return;
+    }
+
+    const ART: f32 = 96.0;
+    const CARD_W: f32 = 430.0;
+
+    let frame = egui::Frame::new()
+        .fill(egui::Color32::from_rgba_unmultiplied(12, 12, 16, 226))
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(12))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+        ));
+
+    egui::Area::new(egui::Id::new("now_playing"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+        .show(ctx, |ui| {
+            frame.show(ui, |ui| {
+                ui.set_width(CARD_W);
+                ui.horizontal(|ui| {
+                    // Album art (or a placeholder block until it loads).
+                    if let Some(tex) = art {
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(egui::vec2(ART, ART))
+                                .corner_radius(egui::CornerRadius::same(8)),
+                        );
+                    } else {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(ART, ART), egui::Sense::hover());
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(8),
+                            egui::Color32::from_rgb(30, 30, 38),
+                        );
+                    }
+
+                    ui.add_space(12.0);
+
+                    ui.vertical(|ui| {
+                        ui.set_width(CARD_W - ART - 40.0);
+
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&np.title)
+                                    .strong()
+                                    .size(18.0)
+                                    .color(egui::Color32::from_rgb(240, 240, 245)),
+                            )
+                            .truncate(),
+                        );
+
+                        let mut sub = np.artist.clone();
+                        if !np.album.is_empty() {
+                            if !sub.is_empty() {
+                                sub.push_str("  —  ");
+                            }
+                            sub.push_str(&np.album);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(sub)
+                                    .size(13.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 180)),
+                            )
+                            .truncate(),
+                        );
+
+                        ui.add_space(10.0);
+
+                        // Seekable position bar — click or drag to seek.
+                        let frac = if np.length_secs > 0.0 {
+                            (np.position_secs / np.length_secs).clamp(0.0, 1.0) as f32
+                        } else {
+                            0.0
+                        };
+                        let bar_w = ui.available_width();
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(bar_w, 7.0),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let painter = ui.painter();
+                        painter.rect_filled(
+                            rect,
+                            egui::CornerRadius::same(3),
+                            egui::Color32::from_rgb(42, 42, 52),
+                        );
+                        let mut fill = rect;
+                        fill.set_width(rect.width() * frac);
+                        painter.rect_filled(
+                            fill,
+                            egui::CornerRadius::same(3),
+                            egui::Color32::from_rgb(120, 170, 255),
+                        );
+                        if (resp.clicked() || resp.dragged()) && np.length_secs > 0.0 {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let f =
+                                    ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+                                cmds.push(Command::SeekTo(f * np.length_secs));
+                            }
+                        }
+
+                        ui.add_space(6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} / {}",
+                                    fmt_time(np.position_secs),
+                                    fmt_time(np.length_secs)
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 150)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button(egui::RichText::new("▶▶").size(15.0)).clicked() {
+                                        cmds.push(Command::Next);
+                                    }
+                                    let pp = if np.playing { "❚❚" } else { "▶" };
+                                    if ui.button(egui::RichText::new(pp).size(15.0)).clicked() {
+                                        cmds.push(Command::PlayPause);
+                                    }
+                                    if ui.button(egui::RichText::new("◀◀").size(15.0)).clicked() {
+                                        cmds.push(Command::Previous);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                });
+            });
+        });
+}
+
+fn fmt_time(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "0:00".into();
+    }
+    let t = secs as u64;
+    format!("{}:{:02}", t / 60, t % 60)
 }
