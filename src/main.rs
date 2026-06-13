@@ -38,6 +38,12 @@ struct Args {
     device: Option<String>,
     /// Print input devices and exit.
     list_devices: bool,
+    /// Benchmark: run uncapped, measure frame times for N seconds, print, exit.
+    bench: Option<f64>,
+    /// Force the window/render size (physical px) — e.g. for a 4K bench.
+    win: Option<(u32, u32)>,
+    /// Start with all sky effects off (isolate the fullscreen sky cost).
+    no_sky: bool,
 }
 
 fn parse_args() -> Args {
@@ -48,6 +54,9 @@ fn parse_args() -> Args {
         ws_url: None,
         device: None,
         list_devices: false,
+        bench: None,
+        win: None,
+        no_sky: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -62,6 +71,17 @@ fn parse_args() -> Args {
             "--ws" => args.ws_url = it.next(),
             "--device" => args.device = it.next(),
             "--list-devices" => args.list_devices = true,
+            "--no-sky" => args.no_sky = true,
+            "--bench" => {
+                args.bench = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or(6.0))
+            }
+            "--win" => {
+                let w = it.next().and_then(|v| v.parse().ok());
+                let h = it.next().and_then(|v| v.parse().ok());
+                if let (Some(w), Some(h)) = (w, h) {
+                    args.win = Some((w, h));
+                }
+            }
             "--sim-hz" => {
                 args.sim_hz = it
                     .next()
@@ -104,19 +124,22 @@ struct State {
 
     fps_frames: u32,
     fps_since: Instant,
+
+    // Benchmark mode: measure frame times for bench_secs (after a 1s warmup),
+    // print a parseable line, exit.
+    bench_secs: Option<f64>,
+    bench_start: Option<Instant>,
+    bench_dts: Vec<f32>,
 }
 
 impl State {
     fn new(event_loop: &ActiveEventLoop, args: &Args) -> State {
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("murmuration")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1600, 900)),
-                )
-                .expect("create window"),
-        );
+        let attrs = Window::default_attributes().with_title("murmuration");
+        let attrs = match args.win {
+            Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
+            None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1600, 900)),
+        };
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -146,7 +169,7 @@ impl State {
             .copied()
             .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let present_mode = if args.uncapped {
+        let present_mode = if args.uncapped || args.bench.is_some() {
             [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
                 .into_iter()
                 .find(|m| caps.present_modes.contains(m))
@@ -209,9 +232,16 @@ impl State {
             args.sim_hz
         );
 
+        let mut ui_state = ui::UiState::new(args.birds);
+        if args.no_sky {
+            ui_state.bg_intensity = 0.0;
+            ui_state.aurora = 0.0;
+            ui_state.fluid_mix = 0.0;
+        }
+
         State {
             ui,
-            ui_state: ui::UiState::new(args.birds),
+            ui_state,
             window,
             surface,
             device,
@@ -241,7 +271,28 @@ impl State {
             last_frame: Instant::now(),
             fps_frames: 0,
             fps_since: Instant::now(),
+            bench_secs: args.bench,
+            bench_start: None,
+            bench_dts: Vec::new(),
         }
+    }
+
+    fn print_bench_and_exit(&self) -> ! {
+        let mut dts = self.bench_dts.clone();
+        dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = dts.len().max(1);
+        let sum: f32 = dts.iter().sum();
+        let avg_fps = n as f32 / sum.max(1e-6);
+        // 1%-low = mean frametime of the slowest 1% of frames, as fps.
+        let tail = (n / 100).max(1);
+        let slow = dts.iter().rev().take(tail).sum::<f32>() / tail as f32;
+        let low1_fps = 1.0 / slow.max(1e-6);
+        let median_ms = dts[n / 2] * 1000.0;
+        eprintln!(
+            "BENCH birds={} res={}x{} frames={} avg_fps={:.1} 1%low_fps={:.1} median_ms={:.2}",
+            self.sim.n, self.config.width, self.config.height, n, avg_fps, low1_fps, median_ms
+        );
+        std::process::exit(0);
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -309,8 +360,22 @@ impl State {
         // === Fixed-timestep accumulator. Render rate floats with the display;
         // simulation always advances in exact tick_dt slices.
         let now = Instant::now();
-        let frame_dt = (now - self.last_frame).as_secs_f64().min(0.25);
+        let raw_dt = (now - self.last_frame).as_secs_f64();
+        let frame_dt = raw_dt.min(0.25);
         self.last_frame = now;
+
+        // Benchmark: 1s warmup, then record frame times for bench_secs, print, exit.
+        if let Some(bsecs) = self.bench_secs {
+            let start = *self.bench_start.get_or_insert(now);
+            let elapsed = (now - start).as_secs_f64();
+            if elapsed > 1.0 {
+                self.bench_dts.push(raw_dt as f32);
+            }
+            if elapsed > 1.0 + bsecs {
+                self.print_bench_and_exit();
+            }
+        }
+
         self.accumulator += frame_dt;
 
         let mut steps = 0;
