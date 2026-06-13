@@ -6,7 +6,7 @@
 //! indexes the buffers holding current state.
 
 use crate::hot::Sources;
-use crate::params::{CELLS, SLOTS_PER_CELL};
+use crate::params::{slots_for, CELLS};
 use wgpu::util::DeviceExt;
 
 struct Pipelines {
@@ -80,7 +80,7 @@ impl Sim {
         });
         let grid_cells = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("grid cells"),
-            size: (CELLS * SLOTS_PER_CELL) as u64 * 4,
+            size: (CELLS * slots_for(n)) as u64 * 4,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });

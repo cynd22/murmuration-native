@@ -5,12 +5,29 @@
 //! byte-for-byte mirror of the WGSL `Params` struct in shaders/common.wgsl —
 //! if you change one, change the other.
 
-// === Spatial-hash grid (matches the HTML build: 16x8x16 cells, 16 slots).
+// === Spatial-hash grid. GRID_Y raised 8->16 (experiment): the flock is oblate
+// (Y attraction x2.5) so Y is the packing axis, yet it had the fewest/fattest
+// cells. Y cell = 2600/16 = 162.5, still >= the loud zone-radius ceiling (~136)
+// so the 3x3x3 stencil stays correct; per-cell Y occupancy roughly halves.
 pub const GRID_X: u32 = 16;
-pub const GRID_Y: u32 = 8;
+pub const GRID_Y: u32 = 16;
 pub const GRID_Z: u32 = 16;
-pub const SLOTS_PER_CELL: u32 = 16;
+pub const SLOTS_PER_CELL: u32 = 16; // minimum / low-tier fallback; see slots_for()
 pub const CELLS: u32 = GRID_X * GRID_Y * GRID_Z;
+
+/// Slots-per-cell scaled to bird count so the cap stops silently dropping
+/// neighbours at high N (~2.5x mean occupancy headroom, power-of-two, clamped).
+/// 10k->16, 150k->~128, 1M->256. grid_slots is a runtime uniform, so this only
+/// affects the grid_cells buffer size and the value handed to the shaders.
+pub fn slots_for(n: u32) -> u32 {
+    // NOTE (experiment finding): scaling slots up to mean*2.5 collapsed perf —
+    // a murmuration is densely clumped, so dense-cell birds then honestly visit
+    // 100+ neighbours x 27 cells (the O(N x density) wall). A modest cap (32)
+    // restores some neighbour honesty at 150k at ~2x dense-cell cost; going
+    // higher is the cliff. 16 stays the floor for parity with master.
+    let mean = (2.5 * n as f32 / CELLS as f32).ceil() as u32;
+    mean.max(SLOTS_PER_CELL).next_power_of_two().clamp(16, 32)
+}
 
 // World extent the grid covers — slightly larger than the bounding box so edge
 // birds hash into real cells. If you change the box, change this too.
@@ -133,7 +150,7 @@ impl Settings {
             dt,
             time_ms,
             num_birds,
-            grid_slots: SLOTS_PER_CELL,
+            grid_slots: slots_for(num_birds),
             grid_dim: [GRID_X as f32, GRID_Y as f32, GRID_Z as f32, 0.0],
             cell_size: [cell_size[0], cell_size[1], cell_size[2], 0.0],
             world_min: [-FLOCK_EXTENT[0], -FLOCK_EXTENT[1], -FLOCK_EXTENT[2], 0.0],

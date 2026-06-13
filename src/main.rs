@@ -350,6 +350,37 @@ impl State {
         }
     }
 
+    /// One simulation tick at the given dt (seconds). Advances audio envelopes,
+    /// writes sim params, dispatches the compute step, advances sim time.
+    fn run_tick(&mut self, dt: f32) {
+        let d = self.audio.tick(dt, &self.settings);
+        self.last_driven = d;
+
+        let mut p = self.settings.sim_params(
+            dt,
+            (self.sim_time_s * 1000.0) as f32,
+            self.sim.n,
+            self.ui_state.cam.position().into(),
+        );
+        p.shape_center = [0.0, d.shape_center_y, 0.0, d.attract];
+        p.separation_dist = d.separation;
+        p.alignment_dist = d.alignment;
+        p.cohesion_dist = d.cohesion;
+        p.freedom = d.freedom;
+        p.max_speed = d.max_speed;
+        p.max_turn_rate = d.max_turn_rate;
+        p.shear = d.shear;
+        p.shock_strength = d.shock_strength;
+        self.queue
+            .write_buffer(&self.sim.params_buf, 0, bytemuck::bytes_of(&p));
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.sim.step(&mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+
+        self.sim_time_s += dt as f64;
+    }
+
     fn frame(&mut self) {
         self.hot_reload();
         if self.ui_state.apply_birds {
@@ -378,40 +409,23 @@ impl State {
 
         self.accumulator += frame_dt;
 
+        // Adaptive fixed timestep. Normal load: 0-N exact tick_dt steps. Under
+        // overload (high N / weak GPU) the old code drained up to 32 steps,
+        // which AMPLIFIED a slow frame into a 32x-worse one (the 1M death-spiral:
+        // 497ms = ~32 x 15.5ms). Now we cap the catch-up and, if still behind,
+        // take ONE final step at the real leftover dt (clamped) so the sim keeps
+        // real time without spiralling and without slow-mo. Every force + the
+        // damping are per-dt-converted, so a variable dt stays behaviour-correct.
+        const MAX_STEPS: u32 = 4;
         let mut steps = 0;
-        while self.accumulator >= self.tick_dt && steps < 32 {
-            // Audio envelopes advance at sim rate; driven values land in this
-            // tick's params (motion) and are stashed for render (colour/sky).
-            let d = self.audio.tick(self.tick_dt as f32, &self.settings);
-            self.last_driven = d;
-
-            let mut p = self.settings.sim_params(
-                self.tick_dt as f32,
-                (self.sim_time_s * 1000.0) as f32,
-                self.sim.n,
-                self.ui_state.cam.position().into(),
-            );
-            p.shape_center = [0.0, d.shape_center_y, 0.0, d.attract];
-            p.separation_dist = d.separation;
-            p.alignment_dist = d.alignment;
-            p.cohesion_dist = d.cohesion;
-            p.freedom = d.freedom;
-            p.max_speed = d.max_speed;
-            p.max_turn_rate = d.max_turn_rate;
-            p.shear = d.shear;
-            p.shock_strength = d.shock_strength;
-            self.queue.write_buffer(&self.sim.params_buf, 0, bytemuck::bytes_of(&p));
-
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-            self.sim.step(&mut encoder);
-            self.queue.submit(Some(encoder.finish()));
-
-            self.sim_time_s += self.tick_dt;
+        while self.accumulator >= self.tick_dt && steps < MAX_STEPS {
+            self.run_tick(self.tick_dt as f32);
             self.accumulator -= self.tick_dt;
             steps += 1;
         }
-        if steps == 32 {
-            // Severe stall — drop the backlog rather than spiral.
+        if self.accumulator >= self.tick_dt {
+            let dt = self.accumulator.min(1.0 / 30.0) as f32;
+            self.run_tick(dt);
             self.accumulator = 0.0;
         }
 
