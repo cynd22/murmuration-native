@@ -14,6 +14,7 @@ pub struct Sources {
     pub velocity: String,
     pub position: String,
     pub bird: String,
+    pub background: String,
 }
 
 impl Sources {
@@ -25,6 +26,7 @@ impl Sources {
             velocity: read("velocity.wgsl")?,
             position: read("position.wgsl")?,
             bird: read("bird.wgsl")?,
+            background: read("background.wgsl")?,
         })
     }
 

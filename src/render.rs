@@ -8,11 +8,6 @@
 use crate::hot::Sources;
 use glam::{Mat4, Vec3};
 
-// Camera defaults — match cameraSettings in the HTML build.
-pub const CAM_FOV_DEG: f32 = 18.0;
-pub const CAM_POS: Vec3 = Vec3::new(0.0, -300.0, 3500.0);
-pub const CAM_LOOK_AT: Vec3 = Vec3::new(0.0, 250.0, 0.0);
-
 // Sky 0x0a1428, raw (non-sRGB surface).
 pub const SKY: wgpu::Color = wgpu::Color {
     r: 0.03922,
@@ -21,19 +16,86 @@ pub const SKY: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-// Ocean palette — the load-bearing default. paletteT sits at tOffset during
-// silence, which is the dark trough.
-const PALETTE_A: [f32; 4] = [0.0, 0.5, 0.5, 0.0];
-const PALETTE_B: [f32; 4] = [0.0, 0.5, 0.5, 0.0];
-const PALETTE_C: [f32; 4] = [0.0, 0.5, 0.333, 0.0];
-const PALETTE_D: [f32; 4] = [0.0, 0.5, 0.667, 0.0];
-const PALETTE_INTENSITY: f32 = 0.65;
+/// Camera — defaults match cameraSettings in the HTML build; UI-adjustable.
+#[derive(Clone, Copy)]
+pub struct CamSettings {
+    pub pov_height: f32,
+    pub distance: f32,
+    pub fov_deg: f32,
+}
+
+impl Default for CamSettings {
+    fn default() -> Self {
+        Self {
+            pov_height: -300.0,
+            distance: 3500.0,
+            fov_deg: 18.0,
+        }
+    }
+}
+
+impl CamSettings {
+    pub fn position(&self) -> Vec3 {
+        Vec3::new(0.0, self.pov_height, self.distance)
+    }
+}
+
+pub const CAM_LOOK_AT: Vec3 = Vec3::new(0.0, 250.0, 0.0);
+
+/// iq cosine palette presets — same table as the HTML build. `ocean` first:
+/// it's the load-bearing default (dark trough at low t).
+pub const PALETTE_PRESETS: [(&str, [[f32; 4]; 4]); 5] = [
+    ("ocean", [
+        [0.0, 0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.333, 0.0],
+        [0.0, 0.5, 0.667, 0.0],
+    ]),
+    ("sunset", [
+        [0.5, 0.5, 0.5, 0.0],
+        [0.5, 0.5, 0.5, 0.0],
+        [1.0, 0.7, 0.4, 0.0],
+        [0.0, 0.15, 0.20, 0.0],
+    ]),
+    ("fire", [
+        [0.5, 0.5, 0.5, 0.0],
+        [0.5, 0.5, 0.5, 0.0],
+        [1.0, 1.0, 0.5, 0.0],
+        [0.8, 0.9, 0.30, 0.0],
+    ]),
+    ("rose", [
+        [0.8, 0.5, 0.4, 0.0],
+        [0.2, 0.4, 0.2, 0.0],
+        [2.0, 1.0, 1.0, 0.0],
+        [0.0, 0.25, 0.25, 0.0],
+    ]),
+    ("spectrum", [
+        [0.5, 0.5, 0.5, 0.0],
+        [0.5, 0.5, 0.5, 0.0],
+        [1.0, 1.0, 1.0, 0.0],
+        [0.0, 0.33, 0.67, 0.0],
+    ]),
+];
+
+/// Everything the renderer needs for one frame's uniforms.
+pub struct FrameStyle {
+    pub cam: CamSettings,
+    pub palette: [[f32; 4]; 4],
+    pub palette_t: f32,
+    pub palette_intensity: f32,
+    pub twinkle: f32,
+    pub time_ms: f32,
+    pub bands: [f32; 4], // smoothed subBass, bass, mid, air
+    pub beat: [f32; 4],  // phase, confidence, bpm/200, time seconds
+    pub bg: [f32; 4],    // intensity, clouds, stars, beat pulse
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RenderUniforms {
     view_proj: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
     palette_a: [f32; 4],
     palette_b: [f32; 4],
     palette_c: [f32; 4],
@@ -46,6 +108,9 @@ struct RenderUniforms {
     twinkle_amount: f32,
     _pad0: f32,
     _pad1: f32,
+    bands: [f32; 4],
+    beat: [f32; 4],
+    bg: [f32; 4],
 }
 
 pub struct Renderer {
@@ -54,6 +119,7 @@ pub struct Renderer {
     layout: wgpu::PipelineLayout,
     bird_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
+    background_pipeline: wgpu::RenderPipeline,
     depth: wgpu::TextureView,
     format: wgpu::TextureFormat,
     n: u32,
@@ -139,8 +205,8 @@ impl Renderer {
             ..Default::default()
         });
 
-        let (bird_pipeline, ground_pipeline) =
-            build_pipelines(device, &layout, format, &sources.bird)?;
+        let (bird_pipeline, ground_pipeline, background_pipeline) =
+            build_pipelines(device, &layout, format, sources)?;
 
         Ok(Self {
             uniforms_buf,
@@ -148,6 +214,7 @@ impl Renderer {
             layout,
             bird_pipeline,
             ground_pipeline,
+            background_pipeline,
             depth: create_depth(device, width, height),
             format,
             n: sim.n,
@@ -155,9 +222,11 @@ impl Renderer {
     }
 
     pub fn rebuild(&mut self, device: &wgpu::Device, sources: &Sources) -> Result<(), wgpu::Error> {
-        let (bird, ground) = build_pipelines(device, &self.layout, self.format, &sources.bird)?;
+        let (bird, ground, background) =
+            build_pipelines(device, &self.layout, self.format, sources)?;
         self.bird_pipeline = bird;
         self.ground_pipeline = ground;
+        self.background_pipeline = background;
         Ok(())
     }
 
@@ -165,31 +234,29 @@ impl Renderer {
         self.depth = create_depth(device, width, height);
     }
 
-    pub fn update_uniforms(
-        &self,
-        queue: &wgpu::Queue,
-        aspect: f32,
-        time_ms: f32,
-        palette_t: f32,
-        twinkle: f32,
-    ) {
-        let view = Mat4::look_at_rh(CAM_POS, CAM_LOOK_AT, Vec3::Y);
-        let proj = Mat4::perspective_rh(CAM_FOV_DEG.to_radians(), aspect, 1.0, 5000.0);
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, aspect: f32, style: &FrameStyle) {
+        let view = Mat4::look_at_rh(style.cam.position(), CAM_LOOK_AT, Vec3::Y);
+        let proj = Mat4::perspective_rh(style.cam.fov_deg.to_radians(), aspect, 1.0, 5000.0);
+        let view_proj = proj * view;
         let u = RenderUniforms {
-            view_proj: (proj * view).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
-            palette_a: PALETTE_A,
-            palette_b: PALETTE_B,
-            palette_c: PALETTE_C,
-            palette_d: PALETTE_D,
-            palette_t,
-            palette_intensity: PALETTE_INTENSITY,
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+            palette_a: style.palette[0],
+            palette_b: style.palette[1],
+            palette_c: style.palette[2],
+            palette_d: style.palette[3],
+            palette_t: style.palette_t,
+            palette_intensity: style.palette_intensity,
             palette_enabled: 1.0,
-            time: time_ms,
+            time: style.time_ms,
             num_birds: self.n as f32,
-            twinkle_amount: twinkle,
+            twinkle_amount: style.twinkle,
             _pad0: 0.0,
             _pad1: 0.0,
+            bands: style.bands,
+            beat: style.beat,
+            bg: style.bg,
         };
         queue.write_buffer(&self.uniforms_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -218,6 +285,8 @@ impl Renderer {
         });
 
         pass.set_bind_group(0, &self.bind_groups[flip], &[]);
+        pass.set_pipeline(&self.background_pipeline);
+        pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.ground_pipeline);
         pass.draw(0..6, 0..1);
         pass.set_pipeline(&self.bird_pipeline);
@@ -248,13 +317,17 @@ fn build_pipelines(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
-    bird_src: &str,
-) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), wgpu::Error> {
+    sources: &Sources,
+) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline), wgpu::Error> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
+    // bird.wgsl declares RenderUniforms + palette(); background.wgsl rides in
+    // the same module so they stay in sync automatically.
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("bird.wgsl"),
-        source: wgpu::ShaderSource::Wgsl(bird_src.into()),
+        label: Some("bird.wgsl + background.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{}\n{}", sources.bird, sources.background).into(),
+        ),
     });
 
     let depth_state = wgpu::DepthStencilState {
@@ -264,8 +337,16 @@ fn build_pipelines(
         stencil: Default::default(),
         bias: Default::default(),
     };
+    // Background: drawn at the far plane, never writes depth.
+    let bg_depth_state = wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth32Float,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: Default::default(),
+        bias: Default::default(),
+    };
 
-    let mk = |label: &str, vs: &str, fs: &str| {
+    let mk = |label: &str, vs: &str, fs: &str, depth: &wgpu::DepthStencilState| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -280,7 +361,7 @@ fn build_pipelines(
                 cull_mode: None, // birds are double-sided triangles
                 ..Default::default()
             },
-            depth_stencil: Some(depth_state.clone()),
+            depth_stencil: Some(depth.clone()),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -297,11 +378,12 @@ fn build_pipelines(
         })
     };
 
-    let bird = mk("birds", "vs_bird", "fs_bird");
-    let ground = mk("ground", "vs_ground", "fs_ground");
+    let bird = mk("birds", "vs_bird", "fs_bird", &depth_state);
+    let ground = mk("ground", "vs_ground", "fs_ground", &depth_state);
+    let background = mk("background", "vs_bg", "fs_bg", &bg_depth_state);
 
     match pollster::block_on(scope.pop()) {
         Some(err) => Err(err),
-        None => Ok((bird, ground)),
+        None => Ok((bird, ground, background)),
     }
 }

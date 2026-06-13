@@ -13,6 +13,7 @@ mod hot;
 mod params;
 mod render;
 mod sim;
+mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -74,10 +75,13 @@ struct State {
     renderer: render::Renderer,
     settings: params::Settings,
     audio: audio::AudioEngine,
-    // Last driven colour values — written per tick, read at render time.
-    palette_t: f32,
-    twinkle: f32,
-    audio_connected: bool,
+    // Last tick's driven values — read at render time (most frames run zero
+    // ticks at high fps, so this carries between them).
+    last_driven: audio::Driven,
+    ui: ui::Ui,
+    ui_state: ui::UiState,
+    sources: hot::Sources,
+    fps_current: f32,
     watcher: hot::ShaderWatcher,
     shader_dir: std::path::PathBuf,
 
@@ -173,6 +177,7 @@ impl State {
         .unwrap_or_else(|e| panic!("initial render shader compile failed:\n{e}"));
 
         let watcher = hot::ShaderWatcher::new(shader_dir.clone()).expect("shader watcher");
+        let ui = ui::Ui::new(&window, &device, format);
 
         log::info!(
             "{} birds, sim {} Hz fixed timestep",
@@ -181,6 +186,8 @@ impl State {
         );
 
         State {
+            ui,
+            ui_state: ui::UiState::new(args.birds),
             window,
             surface,
             device,
@@ -190,9 +197,12 @@ impl State {
             renderer,
             settings: params::Settings::default(),
             audio: audio::AudioEngine::new(args.ws_url.clone()),
-            palette_t: 0.11, // trough offset until audio arrives
-            twinkle: 0.0,
-            audio_connected: false,
+            last_driven: audio::Driven {
+                palette_t: 0.11, // trough until audio arrives
+                ..Default::default()
+            },
+            sources,
+            fps_current: 0.0,
             watcher,
             shader_dir,
             tick_dt: 1.0 / args.sim_hz,
@@ -225,13 +235,41 @@ impl State {
                     Ok(()) => log::info!("render shaders reloaded"),
                     Err(e) => log::error!("render shader error (keeping old):\n{e}"),
                 }
+                self.sources = sources;
             }
             Err(e) => log::error!("shader read failed: {e}"),
         }
     }
 
+    /// Rebuild sim + renderer for a new flock size (respawns the flock).
+    fn apply_bird_count(&mut self) {
+        let n = self.ui_state.pending_birds.max(64);
+        match sim::Sim::new(&self.device, n, &self.sources) {
+            Ok(new_sim) => match render::Renderer::new(
+                &self.device,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+                &new_sim,
+                &self.sources,
+            ) {
+                Ok(new_renderer) => {
+                    self.sim = new_sim;
+                    self.renderer = new_renderer;
+                    log::info!("flock resized to {n} birds");
+                }
+                Err(e) => log::error!("renderer rebuild failed: {e}"),
+            },
+            Err(e) => log::error!("sim rebuild failed: {e}"),
+        }
+    }
+
     fn frame(&mut self) {
         self.hot_reload();
+        if self.ui_state.apply_birds {
+            self.ui_state.apply_birds = false;
+            self.apply_bird_count();
+        }
 
         // === Fixed-timestep accumulator. Render rate floats with the display;
         // simulation always advances in exact tick_dt slices.
@@ -243,17 +281,15 @@ impl State {
         let mut steps = 0;
         while self.accumulator >= self.tick_dt && steps < 32 {
             // Audio envelopes advance at sim rate; driven values land in this
-            // tick's params (motion) and are stashed for render (colour).
+            // tick's params (motion) and are stashed for render (colour/sky).
             let d = self.audio.tick(self.tick_dt as f32, &self.settings);
-            self.palette_t = d.palette_t;
-            self.twinkle = d.twinkle;
-            self.audio_connected = d.connected;
+            self.last_driven = d;
 
             let mut p = self.settings.sim_params(
                 self.tick_dt as f32,
                 (self.sim_time_s * 1000.0) as f32,
                 self.sim.n,
-                render::CAM_POS.into(),
+                self.ui_state.cam.position().into(),
             );
             p.shape_center = [0.0, d.shape_center_y, 0.0, d.attract];
             p.separation_dist = d.separation;
@@ -294,16 +330,42 @@ impl State {
         let view = frame.texture.create_view(&Default::default());
 
         let aspect = self.config.width as f32 / self.config.height as f32;
-        self.renderer.update_uniforms(
-            &self.queue,
-            aspect,
-            (self.sim_time_s * 1000.0) as f32,
-            self.palette_t,
-            self.twinkle,
-        );
+        let d = self.last_driven;
+        let style = render::FrameStyle {
+            cam: self.ui_state.cam,
+            palette: render::PALETTE_PRESETS[self.ui_state.palette_idx].1,
+            palette_t: d.palette_t,
+            palette_intensity: self.ui_state.palette_intensity,
+            twinkle: d.twinkle,
+            time_ms: (self.sim_time_s * 1000.0) as f32,
+            bands: d.bg_bands,
+            beat: [
+                d.beat_phase,
+                d.beat_conf,
+                d.bpm / 200.0,
+                self.sim_time_s as f32,
+            ],
+            bg: self.ui_state.bg(),
+        };
+        self.renderer.update_uniforms(&self.queue, aspect, &style);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.renderer.render(&mut encoder, &view, self.sim.flip);
+        self.ui.run_and_paint(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.window,
+            &view,
+            [self.config.width, self.config.height],
+            &mut self.ui_state,
+            &mut self.audio.mapping,
+            &mut self.settings,
+            &d,
+            self.fps_current,
+            self.sim.n,
+            1.0 / self.tick_dt,
+        );
         self.queue.submit(Some(encoder.finish()));
         frame.present();
 
@@ -312,12 +374,13 @@ impl State {
         let elapsed = self.fps_since.elapsed().as_secs_f64();
         if elapsed >= 0.5 {
             let fps = self.fps_frames as f64 / elapsed;
+            self.fps_current = fps as f32;
             self.window.set_title(&format!(
                 "murmuration — {} birds — {:.0} fps — sim {:.0} Hz — audio {}",
                 self.sim.n,
                 fps,
                 1.0 / self.tick_dt,
-                if self.audio_connected { "✓" } else { "✗" }
+                if self.last_driven.connected { "✓" } else { "✗" }
             ));
             self.fps_frames = 0;
             self.fps_since = Instant::now();
@@ -341,6 +404,8 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        let window = state.window.clone();
+        let ui_consumed = state.ui.on_event(&window, &event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
@@ -352,6 +417,17 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => event_loop.exit(),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Character(ref c),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } if !ui_consumed && c.eq_ignore_ascii_case("h") => {
+                state.ui_state.visible = !state.ui_state.visible;
+            }
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.frame(),
             _ => {}

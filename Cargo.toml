@@ -13,6 +13,9 @@ opt-level = 3
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
+egui = "0.34.3"
+egui-wgpu = "0.34.3"
+egui-winit = "0.34.3"
 env_logger = "0.11.10"
 glam = "0.33.1"
 log = "0.4.32"
@@ -23,3 +26,7 @@ serde_json = "1.0.150"
 tungstenite = "0.29.0"
 wgpu = "29.0.3"
 winit = "0.30.13"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

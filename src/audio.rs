@@ -34,18 +34,39 @@ pub struct Bands {
     pub air: f32,
 }
 
+#[derive(Deserialize, Clone, Copy)]
+pub struct BeatMsg {
+    #[serde(default)]
+    pub bpm: f32,
+    #[serde(default)]
+    pub period: f32,
+    #[serde(default, rename = "nextBeatIn")]
+    pub next_beat_in: f32,
+    #[serde(default)]
+    pub confidence: f32,
+}
+
 #[derive(Deserialize)]
 struct FeederMsg {
     #[serde(default)]
     bands: Option<Bands>,
     #[serde(default)]
     onset_envelopes: Option<Bands>,
+    #[serde(default)]
+    beat: Option<BeatMsg>,
+}
+
+#[derive(Clone, Copy)]
+struct BeatState {
+    msg: BeatMsg,
+    received_at: Instant,
 }
 
 #[derive(Default)]
 struct Shared {
     bands: Bands,
     onset_envelopes: Bands,
+    beat: Option<BeatState>,
     connected: bool,
     last_msg: Option<Instant>,
 }
@@ -79,6 +100,12 @@ impl AudioClient {
                                         if let Some(e) = parsed.onset_envelopes {
                                             s.onset_envelopes = e;
                                         }
+                                        if let Some(b) = parsed.beat {
+                                            s.beat = Some(BeatState {
+                                                msg: b,
+                                                received_at: Instant::now(),
+                                            });
+                                        }
                                         s.last_msg = Some(Instant::now());
                                     }
                                 }
@@ -98,12 +125,12 @@ impl AudioClient {
         Self { shared }
     }
 
-    fn snapshot(&self) -> (Bands, Bands, bool) {
+    fn snapshot(&self) -> (Bands, Bands, Option<BeatState>, bool) {
         let s = self.shared.lock().unwrap();
         let fresh = s.connected
             && s.last_msg
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
-        (s.bands, s.onset_envelopes, fresh)
+        (s.bands, s.onset_envelopes, s.beat, fresh)
     }
 }
 
@@ -135,7 +162,24 @@ pub struct Mapping {
     pub low_mid_smoothing: f32,
     pub cohesion_floor: f32,
     pub cohesion_ceiling: f32,
-    // upperMid → turn-rate + shear + partial speed
+    // upperMid → turn-rate + shear + partial speed.
+    //
+    // RELATIVE mode (default, the upperMid fix): the solo axes are driven by
+    // CONTRAST — how far the fast envelope rises above a slow (~6s) rolling
+    // baseline of the band. Absolute level carries almost no solo information
+    // in a dense mix (vocals/rhythm guitar/cymbal bleed keep 2-6kHz
+    // permanently elevated and the feeder's AGC compresses long-term
+    // differences); departure from the song's own baseline does. Heavy-upperMid
+    // songs teach the baseline a higher floor, so only genuine escalation
+    // (a solo entering, a lead taking over) reads as solo. Self-calibrating
+    // per song — a transform of the audio, not a normaliser of the sim.
+    //
+    // ABSOLUTE mode (upper_mid_relative = false) is the original HTML
+    // behaviour: gate + pow on the raw envelope. Kept for A/B.
+    pub upper_mid_relative: bool,
+    pub um_baseline_alpha: f32,  // per-frame@60 alpha of the rolling baseline (~6s tc)
+    pub um_contrast_gain: f32,   // contrast → 0..1 scale (contrast is small; gain lifts it)
+    pub um_contrast_deadzone: f32, // contrast below this is noise — ignored
     pub upper_mid_attack: f32,
     pub upper_mid_release: f32,
     pub upper_mid_gate: f32,
@@ -187,6 +231,10 @@ impl Default for Mapping {
             low_mid_smoothing: 0.05,
             cohesion_floor: 35.0,
             cohesion_ceiling: 80.0,
+            upper_mid_relative: true,
+            um_baseline_alpha: 0.0028, // ~6s time constant
+            um_contrast_gain: 4.0,
+            um_contrast_deadzone: 0.03,
             upper_mid_attack: 0.5,
             upper_mid_release: 0.08,
             upper_mid_gate: 0.08,
@@ -213,7 +261,8 @@ impl Default for Mapping {
 }
 
 /// Per-tick outputs — what actually gets written into SimParams / render
-/// uniforms this tick.
+/// uniforms this tick, plus diagnostics the UI panel displays.
+#[derive(Clone, Copy, Default)]
 pub struct Driven {
     pub attract: f32,
     pub separation: f32,
@@ -228,6 +277,16 @@ pub struct Driven {
     pub palette_t: f32,
     pub twinkle: f32,
     pub connected: bool,
+    // Smoothed band levels for the background shader (subBass, bass, mid, air).
+    pub bg_bands: [f32; 4],
+    // Beat (extrapolated between feeder messages): phase 0..1, confidence, bpm.
+    pub beat_phase: f32,
+    pub beat_conf: f32,
+    pub bpm: f32,
+    // UpperMid lab diagnostics.
+    pub um_raw: f32,
+    pub um_baseline: f32,
+    pub um_t: f32,
 }
 
 #[derive(Default)]
@@ -240,6 +299,7 @@ struct Smoothed {
     mid: f32,
     low_mid: f32,
     upper_mid: f32,
+    upper_mid_baseline: f32,
     air: f32,
 }
 
@@ -271,8 +331,26 @@ impl AudioEngine {
     /// Advance all envelopes by one sim tick and produce the driven values.
     /// Static fallbacks (mapping disabled) match effectController defaults.
     pub fn tick(&mut self, dt: f32, defaults: &crate::params::Settings) -> Driven {
-        let (bands, envelopes, fresh) = self.client.snapshot();
+        let (bands, envelopes, beat, fresh) = self.client.snapshot();
         let m = &self.mapping;
+
+        // Beat phase extrapolated from the last feeder message: at receipt the
+        // next beat was next_beat_in away, so phase advances continuously even
+        // though messages arrive at ~43 Hz. Confidence fades if beat data goes
+        // stale (feeder without the tracker, or paused music).
+        let (beat_phase, beat_conf, bpm) = match beat {
+            Some(b) if b.msg.period > 1e-3 => {
+                let elapsed = b.received_at.elapsed().as_secs_f32();
+                let phase = ((b.msg.period - b.msg.next_beat_in) + elapsed) / b.msg.period;
+                let staleness = (elapsed / 3.0).min(1.0);
+                (
+                    phase.fract(),
+                    (b.msg.confidence * (1.0 - staleness)).max(0.0),
+                    b.msg.bpm,
+                )
+            }
+            _ => (0.0, 0.0, 0.0),
+        };
 
         if !m.enabled {
             return Driven {
@@ -289,6 +367,11 @@ impl AudioEngine {
                 palette_t: m.t_offset,
                 twinkle: 0.0,
                 connected: fresh,
+                bg_bands: [0.0; 4],
+                beat_phase,
+                beat_conf,
+                bpm,
+                ..Default::default()
             };
         }
 
@@ -333,16 +416,36 @@ impl AudioEngine {
         ease(&mut self.sm.air, bands.air, m.air_smoothing, dt);
         let t_air = self.sm.air.clamp(0.0, 1.0);
 
-        // upperMid: fast attack / slow release, then gate + perceptual curve.
+        // upperMid: fast attack / slow release envelope (shared by both modes).
         let uma = if bands.upper_mid > self.sm.upper_mid {
             m.upper_mid_attack
         } else {
             m.upper_mid_release
         };
         ease(&mut self.sm.upper_mid, bands.upper_mid, uma, dt);
-        let um_gated =
-            ((self.sm.upper_mid - m.upper_mid_gate) / (1.0 - m.upper_mid_gate).max(1e-4)).max(0.0);
-        let t_upper_mid = um_gated.min(1.0).powf(m.upper_mid_curve);
+
+        let t_upper_mid = if m.upper_mid_relative {
+            // RELATIVE (solo-contrast) mode: rolling ~6s baseline learns the
+            // song's own upperMid floor; only departure above it drives the
+            // solo axes. See the Mapping field comment for the full rationale.
+            ease(
+                &mut self.sm.upper_mid_baseline,
+                self.sm.upper_mid,
+                m.um_baseline_alpha,
+                dt,
+            );
+            let contrast =
+                (self.sm.upper_mid - self.sm.upper_mid_baseline - m.um_contrast_deadzone).max(0.0);
+            (contrast * m.um_contrast_gain)
+                .min(1.0)
+                .powf(m.upper_mid_curve)
+        } else {
+            // ABSOLUTE mode — original HTML behaviour: gate + perceptual curve.
+            let um_gated = ((self.sm.upper_mid - m.upper_mid_gate)
+                / (1.0 - m.upper_mid_gate).max(1e-4))
+            .max(0.0);
+            um_gated.min(1.0).powf(m.upper_mid_curve)
+        };
 
         // bass onset envelope → colour punctuation (rise-time softened).
         ease(&mut self.sm.bass_onset_for_colour, envelopes.bass, m.onset_smoothing, dt);
@@ -415,6 +518,13 @@ impl AudioEngine {
             palette_t,
             twinkle,
             connected: fresh,
+            bg_bands: [self.sm.sub_bass, self.sm.bass, self.sm.mid, self.sm.air],
+            beat_phase,
+            beat_conf,
+            bpm,
+            um_raw: self.sm.upper_mid,
+            um_baseline: self.sm.upper_mid_baseline,
+            um_t: t_upper_mid,
         }
     }
 }

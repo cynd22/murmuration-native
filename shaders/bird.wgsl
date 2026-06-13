@@ -11,6 +11,7 @@
 struct RenderUniforms {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,  // clip → world rays for the sky shader
     palette_a: vec4<f32>,
     palette_b: vec4<f32>,
     palette_c: vec4<f32>,
@@ -23,6 +24,9 @@ struct RenderUniforms {
     twinkle_amount: f32,
     _pad0: f32,
     _pad1: f32,
+    bands: vec4<f32>,  // smoothed (subBass, bass, mid, air)
+    beat: vec4<f32>,   // (phase 0..1, confidence, bpm/200, time seconds)
+    bg: vec4<f32>,     // (intensity, cloud amount, star amount, beat-pulse amount)
 }
 
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
