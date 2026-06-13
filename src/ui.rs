@@ -473,14 +473,18 @@ fn now_playing_panel(
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
+                            let mut tline = format!(
+                                "{} / {}",
+                                fmt_time(np.position_secs),
+                                fmt_time(np.length_secs)
+                            );
+                            if !np.player.is_empty() {
+                                tline.push_str(&format!("  ·  {}", np.player));
+                            }
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{} / {}",
-                                    fmt_time(np.position_secs),
-                                    fmt_time(np.length_secs)
-                                ))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(140, 140, 150)),
+                                egui::RichText::new(tline)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(140, 140, 150)),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),

@@ -34,6 +34,9 @@ pub struct NowPlaying {
     pub position_secs: f64,
     pub length_secs: f64,
     pub playing: bool,
+    /// Track art URL — used internally for change detection; not read from the
+    /// snapshot (the UI consumes the decoded texture instead).
+    #[allow(dead_code)]
     pub art_url: String,
     pub player: String,
 }

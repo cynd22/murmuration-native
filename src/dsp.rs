@@ -93,6 +93,9 @@ const BEAT_MIN_BEAT_CONFIDENCE: f32 = 0.05;
 pub struct Frame {
     pub bands: [f32; N_BANDS],
     pub raw_bands: [f32; N_BANDS],
+    /// Overall amplitude (0..1) — part of the complete analysis output (parity
+    /// with the Python feeder); not consumed by the current mapping layer.
+    #[allow(dead_code)]
     pub amp: f32,
 }
 
@@ -336,9 +339,14 @@ impl Default for OnsetDetector {
 pub struct BeatOut {
     pub bpm: f32,
     pub period: f32,
+    /// 0..1 within the beat. The engine re-derives phase from next_beat_in for
+    /// smoothness between frames, so this field isn't read directly.
+    #[allow(dead_code)]
     pub phase: f32,
     pub next_beat_in: f32,
     pub confidence: f32,
+    /// True on a predicted beat instant — kept for parity / future use.
+    #[allow(dead_code)]
     pub beat: bool,
 }
 
