@@ -19,6 +19,7 @@ pub struct UiState {
     pub bg_beat_pulse: f32,
     pub fluid_mix: f32,  // how strongly the fluid dye shows in the sky
     pub fluid_heat: f32, // extra additive glow on fresh (hot) plumes
+    pub aurora: f32,     // aurora-borealis curtain layer (independent of fluid_mix)
     pub pending_birds: u32,
     pub apply_birds: bool,
     pub um_baseline_secs: f32, // UI-friendly form of Mapping::um_baseline_alpha
@@ -37,6 +38,7 @@ impl UiState {
             bg_beat_pulse: 0.6,
             fluid_mix: 0.85,
             fluid_heat: 1.0,
+            aurora: 0.7,
             pending_birds: birds,
             apply_birds: false,
             um_baseline_secs: 6.0,
@@ -293,12 +295,15 @@ fn panel(
                     slider(ui, &mut state.bg_stars, 0.0..=1.5, "stars");
                     slider(ui, &mut state.bg_beat_pulse, 0.0..=1.5, "beat pulse (needs BPM lock)");
                     ui.separator();
-                    ui.label("fluid sky (audio-forced):");
-                    slider(ui, &mut state.fluid_mix, 0.0..=1.5, "fluid amount (0 = off)");
+                    ui.label("fluid plumes (rise from horizon):");
+                    slider(ui, &mut state.fluid_mix, 0.0..=1.5, "plume amount (0 = off)");
                     slider(ui, &mut state.fluid_heat, 0.0..=2.0, "plume heat glow");
                     slider(ui, &mut fl.plume, 0.0..=3.0, "injection strength");
                     slider(ui, &mut fl.vorticity, 0.0..=40.0, "swirl (vorticity)");
                     slider(ui, &mut fl.dye_keep, 0.97..=0.999, "cloud lifetime");
+                    ui.separator();
+                    ui.label("aurora borealis (across the top):");
+                    slider(ui, &mut state.aurora, 0.0..=1.5, "aurora amount (0 = off)");
                 });
 
             // === Camera.

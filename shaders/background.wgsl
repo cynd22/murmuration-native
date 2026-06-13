@@ -50,6 +50,19 @@ fn fbm(p_in: vec2<f32>) -> f32 {
     return sum;
 }
 
+// Real aurora-borealis colour ramp, base of the curtain -> ray tips:
+// oxygen green (the dominant 557.7nm emission) -> teal -> the high-altitude
+// oxygen/nitrogen red-magenta. Fixed naturalistic colours; the audio drives
+// brightness and motion, not hue, so it reads as real aurora rather than an
+// RGB light show.
+fn aurora_color(t: f32) -> vec3<f32> {
+    let green   = vec3<f32>(0.05, 1.00, 0.35);
+    let teal    = vec3<f32>(0.10, 0.80, 0.75);
+    let magenta = vec3<f32>(0.70, 0.18, 0.85);
+    let c1 = mix(green, teal, smoothstep(0.0, 0.5, t));
+    return mix(c1, magenta, smoothstep(0.5, 1.0, t));
+}
+
 struct BgOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -138,6 +151,50 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
         col = mix(col, fluid_light, amount);
         // Heat cores push a little extra light additively.
         col += pal_hot * heat * u.bg2.y * 0.15 * sky_mask * u.bg.x;
+    }
+
+    // === Aurora borealis — CORONA VIEW (looking up from below). INDEPENDENT
+    // layer (own on/off via bg2.z), separate from the bottom fluid plumes
+    // (bg2.x), which keep their own switch. Real aurora colours (green base ->
+    // teal -> magenta toward the zenith). Instead of a flat band seen edge-on
+    // ("across the atmosphere"), this projects flowing curtains onto a sky dome
+    // and accumulates them over depth: as we look up (dir.y grows) the plane
+    // coordinate shrinks, so every layer converges overhead — the free-flowing
+    // rays-from-the-zenith look you get standing underneath. Driven by the
+    // fluid field + bass/beat/air.
+    if (u.bg2.z > 0.001 && dir.y > 0.015) {
+        let proj = dir.xz / (dir.y + 0.07); // converges overhead, streaks to horizon
+        var dens = 0.0;
+        let STEPS = 5;
+        for (var k = 0; k < STEPS; k = k + 1) {
+            let fk = f32(k);
+            let scl = 0.55 + fk * 0.45;
+            let dr = vec2<f32>(t_sec * (0.018 + fk * 0.004), t_sec * 0.010);
+            // Domain-warped FBM -> free-flowing curtains that ripple and drift.
+            let warp = fbm(proj * scl * 0.5 + dr);
+            let d = fbm(proj * scl + vec2<f32>(warp * 1.3, warp * 0.6) - dr);
+            // The fluid field warps/brightens the curtains with the music.
+            let fsamp = textureSampleLevel(
+                fluid_tex, fluid_samp,
+                vec2<f32>(fract(proj.x * 0.04 + 0.5), fract(proj.y * 0.04 + 0.5)), 0.0
+            ).x;
+            let curtain = pow(smoothstep(0.40, 0.92, d + fsamp * 0.10), 1.5);
+            // Nearer (lower) layers slightly stronger; far layers fade -> depth.
+            dens += curtain * (1.0 - fk / f32(STEPS) * 0.55);
+        }
+        // Fine vertical shimmer from treble/air; fade in over the upper sky.
+        let shimmer = 1.0 + air * 0.5 * sin(proj.x * 5.0 + t_sec * 3.0);
+        let height_mask = smoothstep(0.02, 0.15, dir.y);
+        // Colour green (low) -> magenta (toward the zenith).
+        let ct = clamp(dir.y * 3.0, 0.0, 1.0);
+        let apulse = pow(0.5 + 0.5 * cos(u.beat.x * 6.28318), 3.0);
+        let drive = 0.22 + 0.85 * bass + 0.6 * apulse * u.beat.y * u.bg.w;
+        var aglow = aurora_color(ct) * dens * shimmer * height_mask * drive * 0.16 * u.bg2.z;
+        // Soft roll-off: the banding was bright green hard-clipping to 1.0 (a
+        // saturated flat patch with a sharp edge). Rolling off keeps the
+        // gradient smooth; the final TPDF dither cleans up the rest.
+        aglow = aglow / (1.0 + aglow * 0.7);
+        col += aglow * u.bg.x;
     }
 
     // Horizon storm-glow: subBass lifts light along the horizon; the beat

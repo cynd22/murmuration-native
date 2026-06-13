@@ -361,7 +361,12 @@ impl State {
                 self.sim_time_s as f32,
             ],
             bg: self.ui_state.bg(),
-            bg2: [self.ui_state.fluid_mix, self.ui_state.fluid_heat, 0.0, 0.0],
+            bg2: [
+                self.ui_state.fluid_mix,
+                self.ui_state.fluid_heat,
+                self.ui_state.aurora,
+                0.0,
+            ],
         };
         self.renderer.update_uniforms(&self.queue, aspect, &style);
 
